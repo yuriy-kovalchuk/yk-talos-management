@@ -1,0 +1,42 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "yk-talos-management.fullname" . }}-manager
+  labels:
+    {{- include "yk-talos-management.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, delete, get, list, update, watch]
+  - apiGroups: [talos.yuriykovalchuk.dev]
+    resources: [talosclusterbootstraps, talosnodes]
+    verbs: [get, list, patch, update, watch]
+  - apiGroups: [talos.yuriykovalchuk.dev]
+    resources: [talosclusterbootstraps/status, talosclusters/status, talosnodes/status]
+    verbs: [get, patch, update]
+  - apiGroups: [talos.yuriykovalchuk.dev]
+    resources: [talosclusters]
+    verbs: [get, list, patch, update, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+{{- if .Values.leaderElection.enabled }}
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create, get, list, update, watch]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "yk-talos-management.fullname" . }}-manager
+  labels:
+    {{- include "yk-talos-management.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "yk-talos-management.fullname" . }}-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "yk-talos-management.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

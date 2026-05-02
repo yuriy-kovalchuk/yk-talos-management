@@ -1,0 +1,69 @@
+{{- if .Values.webhooks.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "yk-talos-management.fullname" . }}
+  labels:
+    {{- include "yk-talos-management.labels" . | nindent 4 }}
+  {{- if .Values.webhooks.certManager.enabled }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "yk-talos-management.fullname" . }}-webhook-cert
+  {{- end }}
+webhooks:
+  - name: vtalosnode.talos.yuriykovalchuk.dev
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    clientConfig:
+      service:
+        name: {{ include "yk-talos-management.fullname" . }}-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /validate-talos-yuriykovalchuk-dev-v1alpha1-talosnode
+    rules:
+      - apiGroups: [talos.yuriykovalchuk.dev]
+        apiVersions: [v1alpha1]
+        resources: [talosnodes]
+        operations: [CREATE, UPDATE]
+  - name: vtaloscluster.talos.yuriykovalchuk.dev
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    clientConfig:
+      service:
+        name: {{ include "yk-talos-management.fullname" . }}-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /validate-talos-yuriykovalchuk-dev-v1alpha1-taloscluster
+    rules:
+      - apiGroups: [talos.yuriykovalchuk.dev]
+        apiVersions: [v1alpha1]
+        resources: [talosclusters]
+        operations: [CREATE, UPDATE]
+  - name: vtalosclusterbootstrap.talos.yuriykovalchuk.dev
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    clientConfig:
+      service:
+        name: {{ include "yk-talos-management.fullname" . }}-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /validate-talos-yuriykovalchuk-dev-v1alpha1-talosclusterbootstrap
+    rules:
+      - apiGroups: [talos.yuriykovalchuk.dev]
+        apiVersions: [v1alpha1]
+        resources: [talosclusterbootstraps]
+        operations: [CREATE, UPDATE]
+{{- if .Values.webhooks.certManager.enabled }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "yk-talos-management.fullname" . }}-webhook-cert
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "yk-talos-management.labels" . | nindent 4 }}
+spec:
+  dnsNames:
+    - {{ include "yk-talos-management.fullname" . }}-webhook.{{ .Release.Namespace }}.svc
+    - {{ include "yk-talos-management.fullname" . }}-webhook.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    {{- toYaml .Values.webhooks.certManager.issuerRef | nindent 4 }}
+  secretName: {{ include "yk-talos-management.fullname" . }}-webhook-certs
+{{- end }}
+{{- end }}

@@ -1,0 +1,61 @@
+# Step 2a — Declare the control plane nodes.
+#
+# Apply after the TalosCluster reaches Ready.
+# Wait for all nodes to reach status.phase=Ready before applying the bootstrap.
+---
+apiVersion: talos.yuriykovalchuk.dev/v1alpha1
+kind: TalosNode
+metadata:
+  name: my-cluster-cp-1
+  namespace: default
+spec:
+  clusterRef: my-cluster
+  role: ControlPlane
+  nodeIP: 10.0.2.100
+  patches:
+    - |
+      machine:
+        install:
+          disk: /dev/sda
+        network:
+          hostname: cp-1
+        nodeLabels:
+          topology.kubernetes.io/zone: us-east-1a
+---
+apiVersion: talos.yuriykovalchuk.dev/v1alpha1
+kind: TalosNode
+metadata:
+  name: my-cluster-cp-2
+  namespace: default
+spec:
+  clusterRef: my-cluster
+  role: ControlPlane
+  nodeIP: 10.0.2.101
+  patches:
+    - |
+      machine:
+        install:
+          disk: /dev/sda
+        network:
+          hostname: cp-2
+        nodeLabels:
+          topology.kubernetes.io/zone: us-east-1b
+---
+apiVersion: talos.yuriykovalchuk.dev/v1alpha1
+kind: TalosNode
+metadata:
+  name: my-cluster-cp-3
+  namespace: default
+spec:
+  clusterRef: my-cluster
+  role: ControlPlane
+  nodeIP: 10.0.2.102
+  patches:
+    - |
+      machine:
+        install:
+          disk: /dev/sda
+        network:
+          hostname: cp-3
+        nodeLabels:
+          topology.kubernetes.io/zone: us-east-1c

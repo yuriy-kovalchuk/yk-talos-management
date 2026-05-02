@@ -1,0 +1,22 @@
+# Step 1 — Define the cluster.
+#
+# The controller generates four secrets in the same namespace:
+#   <name>-secrets        JSON bundle of the cluster PKI (CA, tokens, keys)
+#   <name>-controlplane   Machine config for control-plane nodes
+#   <name>-worker         Machine config for worker nodes
+#   <name>-talosconfig    Admin talosconfig for API client access
+#
+# Apply this first, wait for status.phase=Ready, then apply nodes.
+apiVersion: talos.yuriykovalchuk.dev/v1alpha1
+kind: TalosCluster
+metadata:
+  name: my-cluster
+  namespace: default
+spec:
+  clusterName: my-cluster
+  # IP of the first control-plane node.  Used as the Kubernetes API endpoint
+  # (https://<endpoint>:6443) and as the Talos API endpoint in the generated talosconfig.
+  endpoints:
+    - 10.0.2.149
+  # Must match the Talos release deployed on your nodes.
+  talosVersion: v1.13

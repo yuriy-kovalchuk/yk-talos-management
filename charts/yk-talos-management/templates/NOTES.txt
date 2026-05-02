@@ -1,0 +1,30 @@
+YK Talos Management operator deployed successfully.
+
+Namespace: {{ .Release.Namespace }}
+Image:     {{ include "yk-talos-management.image" . }}
+
+Get operator status:
+  kubectl -n {{ .Release.Namespace }} get deployment {{ include "yk-talos-management.fullname" . }}
+
+Apply your first cluster:
+  kubectl apply -f examples/defaults/00-talos-cluster.yaml
+
+{{- if not .Values.webhooks.enabled }}
+
+NOTE: Webhooks are disabled. Enable them with:
+  webhooks:
+    enabled: true
+{{- end }}
+
+{{- if and .Values.webhooks.enabled (not .Values.webhooks.certManager.enabled) }}
+
+NOTE: Webhooks are enabled but cert-manager integration is off.
+You must manually create a TLS secret named:
+  {{ include "yk-talos-management.fullname" . }}-webhook-certs
+
+in namespace {{ .Release.Namespace }} with keys tls.crt and tls.key,
+or enable cert-manager integration:
+  webhooks:
+    certManager:
+      enabled: true
+{{- end }}

@@ -1,0 +1,20 @@
+# Step 3 — Bootstrap the cluster.
+#
+# Apply after all TalosNodes reach status.phase=Ready.
+#
+# What this does:
+#   1. Calls the Talos Bootstrap API on the first endpoint node to initialise etcd.
+#      (Idempotent — skipped if the Bootstrapped condition is already True.)
+#   2. Retrieves the admin kubeconfig and stores it in secret <clusterRef>-kubeconfig.
+#      (Retried with backoff while the API server is starting up.)
+#
+# Once status.phase=Completed, retrieve the kubeconfig with:
+#   kubectl get secret my-cluster-kubeconfig -o jsonpath='{.data.kubeconfig}' | base64 -d > kubeconfig
+#   kubectl --kubeconfig=kubeconfig get nodes
+apiVersion: talos.yuriykovalchuk.dev/v1alpha1
+kind: TalosClusterBootstrap
+metadata:
+  name: my-cluster-bootstrap
+  namespace: default
+spec:
+  clusterRef: my-cluster

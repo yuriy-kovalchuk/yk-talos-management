@@ -1,0 +1,13 @@
+apiVersion: v2
+name: yk-talos-management
+description: Kubernetes operator for declaratively managing Talos Linux clusters.
+type: application
+version: 0.1.0
+appVersion: "dev"
+keywords:
+  - talos
+  - kubernetes
+  - operator
+home: https://github.com/yuriy-kovalchuk/yk-talos-management
+sources:
+  - https://github.com/yuriy-kovalchuk/yk-talos-management

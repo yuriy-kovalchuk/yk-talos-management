@@ -1,0 +1,97 @@
+image:
+  repository: ghcr.io/yuriy-kovalchuk/yk-talos-management
+  tag: ""  # defaults to Chart.appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicaCount: 1
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Resource limits and requests for the controller container.
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+# Controller manager ports.
+ports:
+  metrics: 8080
+  health: 8081
+  webhook: 9443
+
+metrics:
+  # Expose a Service for Prometheus scraping.
+  enabled: true
+  service:
+    type: ClusterIP
+    port: 8080
+
+# Leader election — should always be enabled in production.
+leaderElection:
+  enabled: true
+  id: yk-talos-management.lock
+
+# Webhooks require TLS. Disable when running locally or without cert-manager.
+webhooks:
+  enabled: true
+  # cert-manager Certificate resource for webhook TLS.
+  # Set certManager.enabled=true to have the chart create it automatically.
+  certManager:
+    enabled: false
+    issuerRef:
+      name: selfsigned-issuer
+      kind: ClusterIssuer
+
+# Pod scheduling controls.
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Pod-level security context.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container-level security context.
+# runAsUser must be numeric so Kubernetes can verify runAsNonRoot — distroless "nonroot" = UID 65532.
+securityContext:
+  runAsUser: 65532
+  runAsGroup: 65532
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Health and readiness probe tuning.
+livenessProbe:
+  initialDelaySeconds: 15
+  periodSeconds: 20
+  failureThreshold: 5
+  timeoutSeconds: 2
+
+readinessProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+  timeoutSeconds: 2
+
+# PodDisruptionBudget — only meaningful when replicaCount > 1.
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# Install CRDs as part of the chart.
+crds:
+  install: true

@@ -1,0 +1,44 @@
+# Step 2b — Declare the worker nodes.
+#
+# Apply after the TalosCluster reaches Ready.
+# Workers can be applied alongside or after control plane nodes.
+---
+apiVersion: talos.yuriykovalchuk.dev/v1alpha1
+kind: TalosNode
+metadata:
+  name: my-cluster-worker-1
+  namespace: default
+spec:
+  clusterRef: my-cluster
+  role: Worker
+  nodeIP: 10.0.2.110
+  patches:
+    - |
+      machine:
+        install:
+          disk: /dev/sda
+        network:
+          hostname: worker-1
+        nodeLabels:
+          node.kubernetes.io/worker: ""
+          topology.kubernetes.io/zone: us-east-1a
+---
+apiVersion: talos.yuriykovalchuk.dev/v1alpha1
+kind: TalosNode
+metadata:
+  name: my-cluster-worker-2
+  namespace: default
+spec:
+  clusterRef: my-cluster
+  role: Worker
+  nodeIP: 10.0.2.111
+  patches:
+    - |
+      machine:
+        install:
+          disk: /dev/sda
+        network:
+          hostname: worker-2
+        nodeLabels:
+          node.kubernetes.io/worker: ""
+          topology.kubernetes.io/zone: us-east-1b
