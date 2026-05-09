@@ -26,27 +26,42 @@ const TalosNodeConditionConfigApplied = "ConfigApplied"
 
 type TalosNodeSpec struct {
 	// +kubebuilder:validation:Required
+	// Name of the TalosCluster this node belongs to.
 	ClusterRef string `json:"clusterRef"`
 
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=ControlPlane;Worker
+	// Role of this node in the cluster.
 	Role TalosNodeRole `json:"role"`
 
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Format=ipv4
+	// IPv4 address of the Talos node.
 	NodeIP string `json:"nodeIP"`
 
+	// YAML patches applied on top of the base machine config.
+	// Patches without an apiVersion key are deep-merged into the machine/cluster config.
+	// Patches with apiVersion (e.g. RegistryMirrorConfig) are appended as separate YAML documents.
 	Patches []string `json:"patches,omitempty"`
 
 	// +kubebuilder:default=true
+	// When true, the controller periodically fetches the running config from the node
+	// and re-applies if it diverges from the desired state. Set to false for nodes
+	// that are frequently offline (e.g. homelab nodes powered down overnight).
 	DriftDetection *bool `json:"driftDetection,omitempty"`
 }
 
 type TalosNodeStatus struct {
-	Phase            TalosNodePhase `json:"phase,omitempty"`
-	Message          string         `json:"message,omitempty"`
-	DeletionAttempts int32          `json:"deletionAttempts,omitempty"`
-	CommonStatus     `json:",inline"`
+	// Current lifecycle phase of the node.
+	Phase TalosNodePhase `json:"phase,omitempty"`
+
+	// Human-readable message describing the current state.
+	Message string `json:"message,omitempty"`
+
+	// Number of failed etcd leave attempts during deletion.
+	DeletionAttempts int32 `json:"deletionAttempts,omitempty"`
+
+	CommonStatus `json:",inline"`
 }
 
 // +kubebuilder:object:root=true
@@ -55,6 +70,7 @@ type TalosNodeStatus struct {
 // +kubebuilder:printcolumn:name=Phase,type=string,JSONPath=.status.phase
 // +kubebuilder:resource:scope=Namespaced,path=talosnodes,shortName=talosnode
 
+// TalosNode applies machine configuration to a single Talos Linux node and manages its lifecycle.
 type TalosNode struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

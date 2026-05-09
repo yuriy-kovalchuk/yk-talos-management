@@ -1,0 +1,6 @@
+processor:
+  ignoreFields:
+    - TypeMeta
+    - ObjectMeta
+render:
+  kubernetesVersion: 1.30

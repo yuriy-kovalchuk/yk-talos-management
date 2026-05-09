@@ -1,6 +1,6 @@
 .PHONY: all manifests build test test-cover lint fmt tidy run clean \
         kind-up kind-down kind-deploy \
-        controller-gen \
+        controller-gen crd-ref-docs api-docs \
         docker-build docker-push buildx-setup \
         install-hooks deps-check \
         help
@@ -14,8 +14,9 @@ KIND_CLUSTER := talos-kind-dev
 KIND_CONFIG  := hack/kind-config.yaml
 
 # Local tool cache — keeps project tooling isolated from the system GOPATH.
-LOCALBIN       ?= $(shell pwd)/bin
-CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
+LOCALBIN        ?= $(shell pwd)/bin
+CONTROLLER_GEN  ?= $(LOCALBIN)/controller-gen
+CRD_REF_DOCS    ?= $(LOCALBIN)/crd-ref-docs
 
 VERSION_PKG := github.com/yuriy-kovalchuk/yk-talos-management/internal/version
 GIT_COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -73,6 +74,18 @@ test-cover:
 ## controller-gen: install controller-gen into the local bin directory
 controller-gen: $(LOCALBIN)
 	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest
+
+## crd-ref-docs: install crd-ref-docs into the local bin directory
+crd-ref-docs: $(LOCALBIN)
+	GOBIN=$(LOCALBIN) go install github.com/elastic/crd-ref-docs@latest
+
+## api-docs: generate API reference documentation from CRD types
+api-docs: crd-ref-docs
+	$(CRD_REF_DOCS) \
+	  --source-path=./api/v1alpha1 \
+	  --config=hack/crd-ref-docs.yaml \
+	  --renderer=markdown \
+	  --output-path=docs/api-reference.md
 
 $(LOCALBIN):
 	mkdir -p $(LOCALBIN)

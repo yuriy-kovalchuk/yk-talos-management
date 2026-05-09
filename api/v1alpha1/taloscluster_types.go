@@ -22,18 +22,24 @@ const (
 
 type TalosClusterSpec struct {
 	// +kubebuilder:validation:Required
+	// Name of the Talos cluster, embedded in generated machine configs.
 	ClusterName string `json:"clusterName"`
 
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
+	// IP addresses of the control plane nodes. The first endpoint is used as the
+	// Kubernetes API server address; all are embedded in the generated talosconfig.
 	Endpoints []string `json:"endpoints"`
 
 	// +kubebuilder:validation:Required
+	// Talos version used when generating machine configs (e.g. v1.13.0).
 	TalosVersion string `json:"talosVersion"`
 }
 
 type TalosClusterStatus struct {
-	Phase        TalosPhase `json:"phase,omitempty"`
+	// Current lifecycle phase of the cluster.
+	Phase TalosPhase `json:"phase,omitempty"`
+
 	CommonStatus `json:",inline"`
 }
 
@@ -44,6 +50,7 @@ type TalosClusterStatus struct {
 // +kubebuilder:storageversion
 // +kubebuilder:webhooks:verbs=create;update,path=/validate-talos-yuriykovalchuk-dev-v1alpha1-taloscluster,validatingWebhookGeneratorStrategy=webhook-client
 
+// TalosCluster generates and stores the secrets bundle, machine configs, and talosconfig for a Talos Linux cluster.
 type TalosCluster struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

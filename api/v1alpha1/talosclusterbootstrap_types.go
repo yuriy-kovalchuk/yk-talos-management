@@ -24,12 +24,17 @@ const (
 
 type TalosClusterBootstrapSpec struct {
 	// +kubebuilder:validation:Required
+	// Name of the TalosCluster this bootstrap belongs to.
 	ClusterRef string `json:"clusterRef"`
 }
 
 type TalosClusterBootstrapStatus struct {
-	Phase        TalosClusterBootstrapPhase `json:"phase,omitempty"`
-	Message      string                     `json:"message,omitempty"`
+	// Current lifecycle phase of the bootstrap process.
+	Phase TalosClusterBootstrapPhase `json:"phase,omitempty"`
+
+	// Human-readable message describing the current state.
+	Message string `json:"message,omitempty"`
+
 	CommonStatus `json:",inline"`
 }
 
@@ -40,6 +45,7 @@ type TalosClusterBootstrapStatus struct {
 // +kubebuilder:resource:scope=Namespaced,path=talosclusterbootstraps,shortName=talosclusterbootstrap
 // +kubebuilder:webhooks:verbs=create;update,path=/validate-talos-yuriykovalchuk-dev-v1alpha1-talosclusterbootstrap,validatingWebhookGeneratorStrategy=webhook-client
 
+// TalosClusterBootstrap bootstraps etcd on the first control plane node and stores the kubeconfig.
 type TalosClusterBootstrap struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
