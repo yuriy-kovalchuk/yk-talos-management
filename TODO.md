@@ -5,8 +5,8 @@
 The operator is functional end-to-end:
 
 - **TalosCluster** — generates secrets bundle, controlplane/worker configs, and talosconfig; idempotent on re-reconcile
-- **TalosNode** — applies machine config via Talos API (insecure on first apply, authenticated on updates); patch merging for per-node overrides
-- **TalosClusterBootstrap** — waits for a ready control plane node, bootstraps etcd, retrieves and stores kubeconfig
+- **TalosNode** — applies machine config via Talos API (insecure on first apply, authenticated on updates); patch merging for per-node overrides; standalone document patches (e.g. RegistryMirrorConfig); merged config saved to `{node}-config` secret after each successful apply
+- **TalosClusterBootstrap** — waits for a ready control plane node, bootstraps etcd, retrieves and stores kubeconfig; falls back to any available control plane endpoint for kubeconfig retrieval (all endpoints embedded in generated talosconfig)
 - Finalizers and cleanup on all three CRDs
 - Structured logging, retry backoff, generation-based idempotency
 
@@ -20,11 +20,9 @@ The operator is functional end-to-end:
 - [ ] Add `SECURITY.md` — vulnerability reporting policy
 - [ ] Add deployment manifests (`config/manager/`, `config/rbac/`, `config/crd/`) via kustomize
 - [ ] Webhook TLS — generate certs, create secret, mount in deployment, add CA bundle to webhook config
-- [x] Unit tests for controllers (`*_test.go` with fake client)
 - [ ] Integration tests — full controller lifecycle against envtest
 
 ### Should Have
-- [ ] GitHub Actions release pipeline — goreleaser, multi-arch image (amd64/arm64), push to ghcr.io
 - [ ] `CHANGELOG.md`
 - [ ] API reference documentation (`docs/api-reference.md`)
 - [ ] Architecture overview (`docs/architecture.md`)
@@ -37,7 +35,6 @@ The operator is functional end-to-end:
 - [ ] `CODE_OF_CONDUCT.md`
 - [ ] `MAINTAINERS.md`
 - [ ] Prometheus metrics / Grafana dashboard examples
-- [ ] Code coverage reporting (Codecov)
 
 ---
 
@@ -53,7 +50,6 @@ The operator is functional end-to-end:
 ### Cluster Lifecycle
 
 - [ ] **Config drift detection** — detect when a node's running config diverges from desired state and re-apply
-- [ ] **Multi-endpoint bootstrap** — bootstrap against any available control plane, not just `endpoints[0]`
 - [ ] **Kubernetes upgrade** — bump the Kubernetes version cluster-wide by changing a field on `TalosCluster`
 - [ ] **Import existing cluster** — adopt a cluster not provisioned by the operator by providing an existing talosconfig and secrets bundle
 - [ ] **Etcd backups** — new `TalosEtcdBackup` and `TalosEtcdBackupSchedule` CRDs for on-demand and cron-scheduled snapshots to S3-compatible storage

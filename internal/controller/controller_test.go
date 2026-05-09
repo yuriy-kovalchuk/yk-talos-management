@@ -578,7 +578,7 @@ func TestTalosNodeReconciler_StandaloneDocumentPatch(t *testing.T) {
 			NodeIP:     "10.0.0.2",
 			Role:       v1alpha1.TalosNodeRoleControlPlane,
 			Patches: []string{
-				"apiVersion: v1alpha1\nkind: RegistryMirrorConfig\nregistryName: docker.io\nendpoints:\n  - https://mirror.example.com/v2/dockerhub\noverridePath: true\n",
+				"apiVersion: v1alpha1\nkind: RegistryMirrorConfig\nname: docker.io\nendpoints:\n  - url: https://mirror.example.com/v2/dockerhub\n    overridePath: true\n",
 			},
 		},
 	}
@@ -986,6 +986,109 @@ func TestTalosClusterBootstrapReconciler_SkipsBootstrapIfAlreadyDone(t *testing.
 	if got.Status.Phase != v1alpha1.TalosClusterBootstrapPhaseCompleted {
 		t.Errorf("expected phase Completed, got %v", got.Status.Phase)
 	}
+}
+
+// When the first endpoint is unreachable but a later one succeeds, GetKubeconfig should
+// complete via the fallback endpoint after etcd bootstrap is already done.
+func TestTalosClusterBootstrapReconciler_DialAnyFallback(t *testing.T) {
+	s := newTestScheme(t)
+	conn := &fakeConnection{kubeconfig: []byte("kubeconfig-data")}
+
+	// Cluster with two endpoints; first dial will fail, second will succeed.
+	cluster := &v1alpha1.TalosCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec: v1alpha1.TalosClusterSpec{
+			ClusterName:  "mycluster",
+			Endpoints:    []string{"10.0.0.1", "10.0.0.2"},
+			TalosVersion: "v1.13.0",
+		},
+	}
+	cpNode := &v1alpha1.TalosNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "cp", Namespace: "default"},
+		Spec:       v1alpha1.TalosNodeSpec{ClusterRef: "mycluster", Role: v1alpha1.TalosNodeRoleControlPlane},
+		Status:     v1alpha1.TalosNodeStatus{Phase: v1alpha1.TalosNodePhaseReady},
+	}
+	bootstrap := &v1alpha1.TalosClusterBootstrap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "mybootstrap",
+			Namespace:  "default",
+			Generation: 1,
+			Finalizers: []string{cleanupFinalizer},
+		},
+		Spec: v1alpha1.TalosClusterBootstrapSpec{ClusterRef: "mycluster"},
+		Status: v1alpha1.TalosClusterBootstrapStatus{
+			Phase: v1alpha1.TalosClusterBootstrapPhaseWaitingForKubeconfig,
+			CommonStatus: v1alpha1.CommonStatus{
+				ObservedGeneration: 1,
+				Conditions:         []metav1.Condition{{Type: "Bootstrapped", Status: metav1.ConditionTrue}},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(cluster, talosconfigSecret(), cpNode, bootstrap).
+		WithStatusSubresource(bootstrap).
+		Build()
+
+	callCount := 0
+	dialer := &fakeDialer{}
+	dialer.err = errors.New("connection refused") // default: fail
+	// Override: first call fails, second succeeds
+	realDial := func(ctx context.Context, cfg []byte, ep string) (TalosConnection, error) {
+		callCount++
+		if callCount == 1 {
+			return nil, errors.New("connection refused")
+		}
+		return conn, nil
+	}
+	_ = realDial // used via custom dialer below
+
+	customDialer := &callCountDialer{
+		responses: []dialResponse{
+			{err: errors.New("connection refused")},
+			{conn: conn},
+		},
+	}
+	r := &TalosClusterBootstrapReconciler{Client: c, Scheme: s, Talos: customDialer}
+
+	_, err := r.Reconcile(context.Background(), rreq("mybootstrap", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if customDialer.callCount != 2 {
+		t.Errorf("expected 2 dial attempts, got %d", customDialer.callCount)
+	}
+
+	var got v1alpha1.TalosClusterBootstrap
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "mybootstrap", Namespace: "default"}, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != v1alpha1.TalosClusterBootstrapPhaseCompleted {
+		t.Errorf("expected phase Completed, got %v", got.Status.Phase)
+	}
+}
+
+type dialResponse struct {
+	conn TalosConnection
+	err  error
+}
+
+type callCountDialer struct {
+	responses []dialResponse
+	callCount int
+}
+
+func (d *callCountDialer) Dial(_ context.Context, _ []byte, _ string) (TalosConnection, error) {
+	if d.callCount >= len(d.responses) {
+		return nil, errors.New("no more dial responses")
+	}
+	r := d.responses[d.callCount]
+	d.callCount++
+	return r.conn, r.err
+}
+
+func (d *callCountDialer) DialInsecure(_ context.Context, _ string) (TalosConnection, error) {
+	return nil, errors.New("not implemented")
 }
 
 func TestTalosClusterBootstrapReconciler_GetKubeconfigError(t *testing.T) {

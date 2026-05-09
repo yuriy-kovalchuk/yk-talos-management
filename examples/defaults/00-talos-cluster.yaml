@@ -14,9 +14,12 @@ metadata:
   namespace: default
 spec:
   clusterName: my-cluster
-  # IP of the first control-plane node.  Used as the Kubernetes API endpoint
-  # (https://<endpoint>:6443) and as the Talos API endpoint in the generated talosconfig.
+  # List all control plane IPs.  The first is used as the Kubernetes API endpoint
+  # (https://<endpoint>:6443); all are embedded in the talosconfig so any node
+  # can be reached for Talos API calls and kubeconfig retrieval.
   endpoints:
-    - 10.0.2.149
+    - 10.0.2.100
+    - 10.0.2.101
+    - 10.0.2.102
   # Must match the Talos release deployed on your nodes.
   talosVersion: v1.13

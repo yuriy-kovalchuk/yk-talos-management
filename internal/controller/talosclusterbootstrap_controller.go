@@ -94,8 +94,6 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	endpoint := cluster.Spec.Endpoints[0]
-
 	// Capture state before any mutations so idempotency checks reflect the
 	// pre-reconcile truth, not the status we are about to write.
 	alreadyBootstrapped := talos.HasCondition(bootstrap.Status.Conditions,
@@ -126,14 +124,28 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 	if err := r.Get(ctx, types.NamespacedName{Name: cluster.Name + "-talosconfig", Namespace: bootstrap.Namespace}, talosconfigSecret); err != nil {
 		return r.setError(ctx, &bootstrap, fmt.Errorf("get talosconfig secret: %w", err))
 	}
-	conn, err := r.Talos.Dial(ctx, talosconfigSecret.Data["talosconfig"], endpoint)
-	if err != nil {
-		return r.setError(ctx, &bootstrap, fmt.Errorf("create client: %w", err))
+	// Bootstrap must happen on endpoints[0] — calling it on another node creates a separate etcd
+	// cluster. For kubeconfig retrieval (post-bootstrap) any control plane endpoint works, so we
+	// try all of them in order.
+	talosconfig := talosconfigSecret.Data["talosconfig"]
+	var (
+		conn     TalosConnection
+		dialedTo string
+		dialErr  error
+	)
+	if alreadyBootstrapped {
+		conn, dialedTo, dialErr = r.dialAny(ctx, talosconfig, cluster.Spec.Endpoints)
+	} else {
+		dialedTo = cluster.Spec.Endpoints[0]
+		conn, dialErr = r.Talos.Dial(ctx, talosconfig, dialedTo)
+	}
+	if dialErr != nil {
+		return r.setError(ctx, &bootstrap, fmt.Errorf("create client: %w", dialErr))
 	}
 	defer conn.Close() //nolint:errcheck
 
 	if !alreadyBootstrapped {
-		if err := conn.Bootstrap(ctx, endpoint); err != nil {
+		if err := conn.Bootstrap(ctx, dialedTo); err != nil {
 			return r.setError(ctx, &bootstrap, fmt.Errorf("bootstrap: %w", err))
 		}
 		talos.SetCondition(&bootstrap.Status.Conditions, metav1.Condition{
@@ -148,8 +160,9 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
-	kubeconfig, err := conn.GetKubeconfig(ctx, endpoint)
+	kubeconfig, err := conn.GetKubeconfig(ctx, dialedTo)
 	if err != nil {
+		l.Error(err, "get kubeconfig failed", "endpoint", dialedTo, "retry", bootstrap.Status.RetryCount+1)
 		bootstrap.Status.RetryCount++
 		bootstrap.Status.Phase = v1alpha1.TalosClusterBootstrapPhaseWaitingForKubeconfig
 		talos.SetCondition(&bootstrap.Status.Conditions, metav1.Condition{
@@ -159,7 +172,7 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 			Message: fmt.Sprintf("Retrying (attempt %d)", bootstrap.Status.RetryCount),
 		})
 		if updateErr := r.Status().Update(ctx, &bootstrap); updateErr != nil {
-			log.FromContext(ctx).Error(updateErr, "update retry status")
+			l.Error(updateErr, "update retry status")
 		}
 		return ctrl.Result{RequeueAfter: config.GetRetryDelay(bootstrap.Status.RetryCount)}, nil
 	}
@@ -181,7 +194,7 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	r.event(&bootstrap, corev1.EventTypeNormal, "Completed", "Bootstrap complete; kubeconfig stored")
-	l.Info("Bootstrap complete", "endpoint", endpoint)
+	l.Info("Bootstrap complete", "endpoint", dialedTo)
 	return ctrl.Result{}, nil
 }
 
@@ -300,6 +313,20 @@ func nodeReadyPredicate() predicate.Predicate {
 		DeleteFunc:  func(event.DeleteEvent) bool { return false },
 		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
+}
+
+// dialAny tries each endpoint in order and returns the first successful connection.
+// Used for operations that can target any available control plane (e.g. GetKubeconfig).
+func (r *TalosClusterBootstrapReconciler) dialAny(ctx context.Context, talosconfig []byte, endpoints []string) (TalosConnection, string, error) {
+	var lastErr error
+	for _, ep := range endpoints {
+		conn, err := r.Talos.Dial(ctx, talosconfig, ep)
+		if err == nil {
+			return conn, ep, nil
+		}
+		lastErr = fmt.Errorf("dial %s: %w", ep, err)
+	}
+	return nil, "", lastErr
 }
 
 func (r *TalosClusterBootstrapReconciler) SetupWithManager(mgr ctrl.Manager) error {

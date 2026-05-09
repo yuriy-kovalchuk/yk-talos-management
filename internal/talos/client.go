@@ -84,21 +84,22 @@ func LoadOrGenSecretsBundle(existingJSON []byte, talosVersion string) (*secrets.
 }
 
 // GenConfig generates controlplane, worker, and talosconfig for a cluster.
-// endpoint is the raw IP of the first control plane node (e.g. "192.168.1.100").
+// endpoints is the list of control plane IPs; endpoints[0] is used as the Kubernetes API server
+// address and all endpoints are embedded in the talosconfig so any control plane can be reached.
 // bundle must be the same pointer returned by GenSecretsBundle — this guarantees all configs are
 // signed by the same CA and share the same tokens.
-func GenConfig(clusterName, endpoint, talosVersion string, bundle *secrets.Bundle) (*ClusterConfigs, error) {
+func GenConfig(clusterName string, endpoints []string, talosVersion string, bundle *secrets.Bundle) (*ClusterConfigs, error) {
 	contract, err := machineconfig.ParseContractFromVersion(talosVersion)
 	if err != nil {
 		return nil, fmt.Errorf("parse version: %w", err)
 	}
 	input, err := generate.NewInput(
 		clusterName,
-		"https://"+endpoint+":6443",
+		"https://"+endpoints[0]+":6443",
 		constants.DefaultKubernetesVersion,
 		generate.WithVersionContract(contract),
 		generate.WithSecretsBundle(bundle),
-		generate.WithEndpointList([]string{endpoint}),
+		generate.WithEndpointList(endpoints),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("build input: %w", err)

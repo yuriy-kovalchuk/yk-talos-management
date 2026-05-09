@@ -144,7 +144,7 @@ func (r *TalosClusterReconciler) provision(ctx context.Context, cluster *v1alpha
 		return fmt.Errorf("store secrets: %w", err)
 	}
 
-	configs, err := talos.GenConfig(cluster.Spec.ClusterName, cluster.Spec.Endpoints[0], cluster.Spec.TalosVersion, bundle)
+	configs, err := talos.GenConfig(cluster.Spec.ClusterName, cluster.Spec.Endpoints, cluster.Spec.TalosVersion, bundle)
 	if err != nil {
 		return err
 	}

@@ -68,6 +68,7 @@ func (r *TalosNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if talos.IsContextCancelled(err) {
 			return ctrl.Result{Requeue: true}, nil
 		}
+		l.Error(err, "apply config failed", "node", node.Name, "ip", node.Spec.NodeIP, "retry", node.Status.RetryCount+1)
 		node.Status.Phase = v1alpha1.TalosNodePhaseError
 		node.Status.RetryCount++
 		node.Status.Message = err.Error()

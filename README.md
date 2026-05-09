@@ -10,9 +10,9 @@ Three CRDs drive the full lifecycle:
 
 | Resource | Responsibility |
 |---|---|
-| `TalosCluster` | Generates the cluster PKI, secrets bundle, and machine configs (controlplane, worker, talosconfig). Stored as Kubernetes secrets. |
-| `TalosNode` | Applies the correct machine config to a node via the Talos API. Supports per-node patches merged on top of the base config. |
-| `TalosClusterBootstrap` | Waits for a control plane node to be ready, bootstraps etcd, then retrieves and stores the admin kubeconfig. |
+| `TalosCluster` | Generates the cluster PKI, secrets bundle, and machine configs (controlplane, worker, talosconfig). All stored as Kubernetes secrets in the same namespace. |
+| `TalosNode` | Applies the correct machine config to a node via the Talos API. Supports per-node patches. The final merged config is saved to a `{node}-config` secret after each successful apply. |
+| `TalosClusterBootstrap` | Waits for a control plane node to be ready, bootstraps etcd, then retrieves and stores the admin kubeconfig. Falls back to any available control plane endpoint if the primary is unreachable. |
 
 ### Flow
 
@@ -32,18 +32,26 @@ TalosClusterBootstrap → etcd bootstrapped → kubeconfig stored in secret
 
 - Kubernetes 1.26+
 - [Helm](https://helm.sh/) 3.10+
-- [cert-manager](https://cert-manager.io/) (required when webhooks are enabled)
 
-### Install
+> Webhooks are disabled by default. [cert-manager](https://cert-manager.io/) is only needed if you enable them.
+
+### Install from GHCR
+
+```bash
+helm upgrade --install yk-talos-management \
+  oci://ghcr.io/yuriy-kovalchuk/charts/yk-talos-management \
+  --version <version> \
+  --namespace yk-talos-management-system \
+  --create-namespace
+```
+
+### Install from source
 
 ```bash
 helm upgrade --install yk-talos-management ./charts/yk-talos-management \
   --namespace yk-talos-management-system \
-  --create-namespace \
-  -f examples/helm/values.yaml
+  --create-namespace
 ```
-
-Adjust `image.repository` and `image.tag` in `examples/helm/values.yaml` to match your registry before installing.
 
 ### Verify
 
@@ -116,54 +124,50 @@ Edit the example manifests in `examples/defaults/` to match your environment, th
 
 ### Step 1 — Define the cluster
 
-```bash
-kubectl apply -f examples/defaults/00-talos-cluster.yaml
+```yaml
+apiVersion: talos.yuriykovalchuk.dev/v1alpha1
+kind: TalosCluster
+metadata:
+  name: my-cluster
+  namespace: default
+spec:
+  clusterName: my-cluster
+  # List all control plane IPs. The first is used as the Kubernetes API endpoint;
+  # all are embedded in the generated talosconfig for HA access.
+  endpoints:
+    - 10.0.2.100
+    - 10.0.2.101
+    - 10.0.2.102
+  talosVersion: v1.13
 ```
 
-Wait for `status.phase=Ready`:
-
 ```bash
+kubectl apply -f examples/defaults/00-talos-cluster.yaml
 kubectl get taloscluster my-cluster -w
 ```
 
-This generates four secrets: `my-cluster-secrets`, `my-cluster-controlplane`, `my-cluster-worker`, `my-cluster-talosconfig`.
+Wait for `status.phase=Ready`. This generates four secrets: `my-cluster-secrets`, `my-cluster-controlplane`, `my-cluster-worker`, `my-cluster-talosconfig`.
 
 ### Step 2 — Declare the nodes
-
-Edit the node files to set the correct IPs and any node-specific patches (hostname, labels, install disk, etc.), then apply:
 
 ```bash
 kubectl apply -f examples/defaults/01-talos-controlplane-nodes.yaml
 kubectl apply -f examples/defaults/02-talos-worker-nodes.yaml
-```
-
-Wait for all nodes to reach `status.phase=Ready`:
-
-```bash
 kubectl get talosnodes -w
 ```
 
+Wait for all nodes to reach `status.phase=Ready`.
+
 > Nodes must be booted from the Talos ISO and sitting in maintenance mode before this step.
-> If a node needs a specific install disk (e.g. Proxmox VM with `/dev/vda`), add it as a patch:
-> ```yaml
-> patches:
->   - |
->     machine:
->       install:
->         disk: /dev/vda
-> ```
 
 ### Step 3 — Bootstrap
 
 ```bash
 kubectl apply -f examples/defaults/03-talos-cluster-bootstrap.yaml
-```
-
-Wait for `status.phase=Completed`:
-
-```bash
 kubectl get talosclusterbootstrap my-cluster-bootstrap -w
 ```
+
+Wait for `status.phase=Completed`.
 
 ### Retrieve the kubeconfig
 
@@ -172,4 +176,66 @@ kubectl get secret my-cluster-kubeconfig \
   -o jsonpath='{.data.kubeconfig}' | base64 -d > kubeconfig
 
 kubectl --kubeconfig=kubeconfig get nodes
+```
+
+---
+
+## Node patches
+
+`spec.patches` on `TalosNode` is a list of YAML strings applied on top of the base machine config before it is sent to the node.
+
+### Machine config patches
+
+Patches with a `machine` key are deep-merged into the base config:
+
+```yaml
+patches:
+  - |
+    machine:
+      install:
+        disk: /dev/sda
+        image: factory.talos.dev/metal-installer/<schematic>:<version>
+      network:
+        hostname: cp-1
+      nodeLabels:
+        topology.kubernetes.io/zone: us-east-1a
+  - |
+    cluster:
+      allowSchedulingOnControlPlanes: true
+      proxy:
+        disabled: true
+```
+
+### Standalone document patches (Talos v1.13+)
+
+Patches without a `machine` key are treated as standalone Talos config documents and appended to the final payload as separate YAML documents. This supports the new document types introduced in Talos v1.13.
+
+**Registry mirrors** (replaces the deprecated `machine.registries`):
+
+```yaml
+patches:
+  - |
+    apiVersion: v1alpha1
+    kind: RegistryMirrorConfig
+    name: docker.io
+    endpoints:
+      - url: https://my-harbor.example.com/v2/dockerhub
+        overridePath: true
+  - |
+    apiVersion: v1alpha1
+    kind: RegistryMirrorConfig
+    name: ghcr.io
+    endpoints:
+      - url: https://my-harbor.example.com/v2/ghcr
+        overridePath: true
+```
+
+> Use `overridePath: true` when the endpoint URL already contains the full registry path (e.g. Harbor proxy cache projects). Without it, containerd appends an extra `/v2/` prefix.
+
+### Inspecting the applied config
+
+After a successful apply, the final merged config (base + all patches) is saved to a secret named `{node}-config` in the same namespace:
+
+```bash
+kubectl get secret my-node-config -o jsonpath='{.data.config\.yaml}' | base64 -d
 ```
