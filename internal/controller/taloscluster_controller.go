@@ -8,7 +8,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -26,12 +25,6 @@ type TalosClusterReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
-}
-
-func (r *TalosClusterReconciler) event(obj client.Object, eventType, reason, msg string) {
-	if r.Recorder != nil {
-		r.Recorder.Event(obj, eventType, reason, msg)
-	}
 }
 
 func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -60,10 +53,10 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	if err := r.provision(ctx, &cluster); err != nil {
 		if talos.IsContextCancelled(err) {
-			return ctrl.Result{Requeue: true}, nil
+			return ctrl.Result{}, nil
 		}
 		cluster.Status.Phase = v1alpha1.TalosPhaseError
-		r.event(&cluster, corev1.EventTypeWarning, "ProvisionFailed", err.Error())
+		emitEvent(r.Recorder, &cluster, corev1.EventTypeWarning, "ProvisionFailed", err.Error())
 		if updateErr := r.Status().Update(ctx, &cluster); updateErr != nil {
 			l.Error(updateErr, "failed to update error status")
 		}
@@ -71,7 +64,7 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	l.Info("Cluster provisioned", "phase", cluster.Status.Phase)
-	r.event(&cluster, corev1.EventTypeNormal, "Provisioned", "Cluster configs and secrets generated successfully")
+	emitEvent(r.Recorder, &cluster, corev1.EventTypeNormal, "Provisioned", "Cluster configs and secrets generated successfully")
 	return ctrl.Result{}, nil
 }
 
@@ -84,10 +77,10 @@ func (r *TalosClusterReconciler) handleDeletion(ctx context.Context, cluster *v1
 
 	sm := talos.NewSecretManager(r.Client, r.Scheme, cluster.Name, cluster.UID)
 	if err := sm.DeleteMultiple(ctx, cluster.Namespace,
-		cluster.Name+"-secrets",
-		cluster.Name+"-controlplane",
-		cluster.Name+"-worker",
-		cluster.Name+"-talosconfig",
+		clusterSecretsName(cluster.Name),
+		clusterControlPlaneName(cluster.Name),
+		clusterWorkerName(cluster.Name),
+		clusterTalosconfigName(cluster.Name),
 	); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -106,18 +99,10 @@ func isUpToDate(cluster *v1alpha1.TalosCluster) bool {
 func (r *TalosClusterReconciler) provision(ctx context.Context, cluster *v1alpha1.TalosCluster) error {
 	cluster.Status.ObservedGeneration = cluster.Generation
 	cluster.Status.Phase = v1alpha1.TalosPhaseProvisioning
-	talos.SetCondition(&cluster.Status.Conditions, metav1.Condition{
-		Type:    v1alpha1.TalosClusterConditionSecretsGenerated,
-		Status:  metav1.ConditionFalse,
-		Reason:  "Generating",
-		Message: "Generating cluster secrets",
-	})
-	talos.SetCondition(&cluster.Status.Conditions, metav1.Condition{
-		Type:    v1alpha1.TalosClusterConditionConfigsGenerated,
-		Status:  metav1.ConditionFalse,
-		Reason:  "Generating",
-		Message: "Generating cluster configs",
-	})
+	talos.SetConditionStatus(&cluster.Status.Conditions,
+		v1alpha1.TalosClusterConditionSecretsGenerated, metav1.ConditionFalse, "Generating", "Generating cluster secrets")
+	talos.SetConditionStatus(&cluster.Status.Conditions,
+		v1alpha1.TalosClusterConditionConfigsGenerated, metav1.ConditionFalse, "Generating", "Generating cluster configs")
 	if err := r.Status().Update(ctx, cluster); err != nil {
 		return fmt.Errorf("update status: %w", err)
 	}
@@ -129,8 +114,7 @@ func (r *TalosClusterReconciler) provision(ctx context.Context, cluster *v1alpha
 	// Load the existing bundle if the secrets secret was already created in a prior
 	// (possibly failed) reconcile, so that all config secrets always share the same CA.
 	var existingBundleJSON []byte
-	existingSecrets := &corev1.Secret{}
-	if r.Get(ctx, types.NamespacedName{Name: cluster.Name + "-secrets", Namespace: cluster.Namespace}, existingSecrets) == nil {
+	if existingSecrets, err := getSecret(ctx, r.Client, clusterSecretsName(cluster.Name), cluster.Namespace); err == nil {
 		existingBundleJSON = existingSecrets.Data["secrets.yaml"]
 	}
 	bundle, bundleBytes, err := talos.LoadOrGenSecretsBundle(existingBundleJSON, cluster.Spec.TalosVersion)
@@ -139,7 +123,7 @@ func (r *TalosClusterReconciler) provision(ctx context.Context, cluster *v1alpha
 	}
 
 	sm := talos.NewSecretManager(r.Client, r.Scheme, cluster.Name, cluster.UID)
-	if err := sm.Create(ctx, cluster.Name+"-secrets", cluster.Namespace,
+	if err := sm.Create(ctx, clusterSecretsName(cluster.Name), cluster.Namespace,
 		"secrets.yaml", string(bundleBytes), corev1.SecretTypeOpaque); err != nil {
 		return fmt.Errorf("store secrets: %w", err)
 	}
@@ -149,36 +133,26 @@ func (r *TalosClusterReconciler) provision(ctx context.Context, cluster *v1alpha
 		return err
 	}
 
-	for name, data := range map[string][]byte{
-		"controlplane": configs.ControlPlane,
-		"worker":       configs.Worker,
-		"talosconfig":  configs.Talosconfig,
-	} {
-		key := name
-		if name != "talosconfig" {
-			key = name + ".yaml"
-		}
-		if err := sm.CreateOrUpdate(ctx, cluster.Name+"-"+name, cluster.Namespace,
-			key, string(data), corev1.SecretTypeOpaque); err != nil {
-			return fmt.Errorf("store %s: %w", name, err)
-		}
+	if err := sm.CreateOrUpdate(ctx, clusterControlPlaneName(cluster.Name), cluster.Namespace,
+		"controlplane.yaml", string(configs.ControlPlane), corev1.SecretTypeOpaque); err != nil {
+		return fmt.Errorf("store controlplane: %w", err)
+	}
+	if err := sm.CreateOrUpdate(ctx, clusterWorkerName(cluster.Name), cluster.Namespace,
+		"worker.yaml", string(configs.Worker), corev1.SecretTypeOpaque); err != nil {
+		return fmt.Errorf("store worker: %w", err)
+	}
+	if err := sm.CreateOrUpdate(ctx, clusterTalosconfigName(cluster.Name), cluster.Namespace,
+		"talosconfig", string(configs.Talosconfig), corev1.SecretTypeOpaque); err != nil {
+		return fmt.Errorf("store talosconfig: %w", err)
 	}
 
 	cluster.Status.Phase = v1alpha1.TalosPhaseReady
 	now := metav1.Now()
 	cluster.Status.LastUpdateTime = &now
-	talos.SetCondition(&cluster.Status.Conditions, metav1.Condition{
-		Type:    v1alpha1.TalosClusterConditionSecretsGenerated,
-		Status:  metav1.ConditionTrue,
-		Reason:  "Generated",
-		Message: "Cluster secrets generated successfully",
-	})
-	talos.SetCondition(&cluster.Status.Conditions, metav1.Condition{
-		Type:    v1alpha1.TalosClusterConditionConfigsGenerated,
-		Status:  metav1.ConditionTrue,
-		Reason:  "Generated",
-		Message: "Cluster configs generated successfully",
-	})
+	talos.SetConditionStatus(&cluster.Status.Conditions,
+		v1alpha1.TalosClusterConditionSecretsGenerated, metav1.ConditionTrue, "Generated", "Cluster secrets generated successfully")
+	talos.SetConditionStatus(&cluster.Status.Conditions,
+		v1alpha1.TalosClusterConditionConfigsGenerated, metav1.ConditionTrue, "Generated", "Cluster configs generated successfully")
 	return r.Status().Update(ctx, cluster)
 }
 

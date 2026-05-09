@@ -13,6 +13,17 @@ func HasCondition(conditions []metav1.Condition, conditionType string, status me
 	return false
 }
 
+// SetConditionStatus is a convenience wrapper around SetCondition for the common
+// case of setting Type, Status, Reason, and Message together.
+func SetConditionStatus(conditions *[]metav1.Condition, condType string, status metav1.ConditionStatus, reason, message string) {
+	SetCondition(conditions, metav1.Condition{
+		Type:    condType,
+		Status:  status,
+		Reason:  reason,
+		Message: message,
+	})
+}
+
 func SetCondition(conditions *[]metav1.Condition, condition metav1.Condition) {
 	now := metav1.Now()
 

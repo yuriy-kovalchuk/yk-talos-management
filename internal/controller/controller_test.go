@@ -68,14 +68,21 @@ func (f *fakeDialer) DialInsecure(_ context.Context, _ string) (TalosConnection,
 }
 
 type fakeConnection struct {
-	applyErr        error
-	applyConfigCall bool
-	applyConfigFn   func(context.Context, string, []byte) error
-	bootstrapErr    error
-	bootstrapCall   bool
-	kubeconfig      []byte
-	kubeconfigErr   error
-	closed          bool
+	applyErr              error
+	applyConfigCall       bool
+	applyConfigFn         func(context.Context, string, []byte) error
+	bootstrapErr          error
+	bootstrapCall         bool
+	kubeconfig            []byte
+	kubeconfigErr         error
+	machineConfig         []byte
+	machineConfigErr      error
+	machineConfigCall     bool
+	etcdLeaveErr          error
+	etcdLeaveCall         bool
+	etcdForceRemoveErr    error
+	etcdForceRemoveCall   bool
+	closed                bool
 }
 
 func (f *fakeConnection) ApplyConfig(ctx context.Context, nodeIP string, cfg []byte) error {
@@ -93,6 +100,21 @@ func (f *fakeConnection) Bootstrap(_ context.Context, _ string) error {
 
 func (f *fakeConnection) GetKubeconfig(_ context.Context, _ string) ([]byte, error) {
 	return f.kubeconfig, f.kubeconfigErr
+}
+
+func (f *fakeConnection) GetMachineConfig(_ context.Context, _ string) ([]byte, error) {
+	f.machineConfigCall = true
+	return f.machineConfig, f.machineConfigErr
+}
+
+func (f *fakeConnection) EtcdLeave(_ context.Context, _ string) error {
+	f.etcdLeaveCall = true
+	return f.etcdLeaveErr
+}
+
+func (f *fakeConnection) EtcdForceRemove(_ context.Context, _, _ string) error {
+	f.etcdForceRemoveCall = true
+	return f.etcdForceRemoveErr
 }
 
 func (f *fakeConnection) Close() error {
@@ -305,9 +327,9 @@ func TestMergePatches(t *testing.T) {
 			expect: map[string]interface{}{"a": 2},
 		},
 		{
-			name:   "deep merge nested maps",
-			base:   map[string]interface{}{"machine": map[string]interface{}{"os": "Linux"}},
-			patch:  map[string]interface{}{"machine": map[string]interface{}{"install": "disk"}},
+			name:  "deep merge nested maps",
+			base:  map[string]interface{}{"machine": map[string]interface{}{"os": "Linux"}},
+			patch: map[string]interface{}{"machine": map[string]interface{}{"install": "disk"}},
 			expect: map[string]interface{}{
 				"machine": map[string]interface{}{
 					"os":      "Linux",
@@ -362,7 +384,7 @@ func TestTalosClusterReconciler_NotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if result.Requeue || result.RequeueAfter != 0 {
+	if result.RequeueAfter != 0 {
 		t.Errorf("expected no requeue, got %+v", result)
 	}
 }
@@ -496,7 +518,7 @@ func TestTalosNodeReconciler_NotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if result.Requeue || result.RequeueAfter != 0 {
+	if result.RequeueAfter != 0 {
 		t.Errorf("expected no requeue, got %+v", result)
 	}
 }
@@ -738,6 +760,136 @@ func TestTalosNodeReconciler_AlreadyUpToDate(t *testing.T) {
 	}
 }
 
+// upToDateNode returns a node in Ready/up-to-date state, ready for drift-check tests.
+func upToDateNode() *v1alpha1.TalosNode {
+	return &v1alpha1.TalosNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "mynode",
+			Namespace:  "default",
+			Generation: 1,
+			Finalizers: []string{cleanupFinalizer},
+		},
+		Spec: v1alpha1.TalosNodeSpec{ClusterRef: "mycluster", NodeIP: "10.0.0.2", Role: v1alpha1.TalosNodeRoleControlPlane},
+		Status: v1alpha1.TalosNodeStatus{
+			Phase: v1alpha1.TalosNodePhaseReady,
+			CommonStatus: v1alpha1.CommonStatus{
+				ObservedGeneration: 1,
+				Conditions:         []metav1.Condition{{Type: "ConfigApplied", Status: metav1.ConditionTrue}},
+			},
+		},
+	}
+}
+
+func savedConfigSecret(data []byte) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "mynode-config", Namespace: "default"},
+		Data:       map[string][]byte{"config.yaml": data},
+	}
+}
+
+func TestTalosNodeReconciler_DriftCheck_NoDrift(t *testing.T) {
+	s := newTestScheme(t)
+	cfg := []byte("machine:\n  type: controlplane\n  hostname: mynode\n")
+	conn := &fakeConnection{machineConfig: cfg}
+
+	node := upToDateNode()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(node, talosconfigSecret(), savedConfigSecret(cfg)).
+		WithStatusSubresource(node).
+		Build()
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: &fakeDialer{conn: conn}}
+
+	result, err := r.Reconcile(context.Background(), rreq("mynode", "default"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != driftCheckInterval {
+		t.Errorf("expected RequeueAfter=%v, got %v", driftCheckInterval, result.RequeueAfter)
+	}
+	if conn.applyConfigCall {
+		t.Error("expected no ApplyConfig call when config is in sync")
+	}
+}
+
+func TestTalosNodeReconciler_DriftCheck_DriftDetected(t *testing.T) {
+	s := newTestScheme(t)
+	saved := []byte("machine:\n  type: controlplane\n  hostname: mynode\n")
+	remote := []byte("machine:\n  type: controlplane\n  hostname: changed-hostname\n")
+	conn := &fakeConnection{machineConfig: remote}
+
+	node := upToDateNode()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(node, testCluster(), cpConfigSecret(), talosconfigSecret(), savedConfigSecret(saved)).
+		WithStatusSubresource(node).
+		Build()
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: &fakeDialer{conn: conn}}
+
+	result, err := r.Reconcile(context.Background(), rreq("mynode", "default"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != driftCheckInterval {
+		t.Errorf("expected RequeueAfter=%v, got %v", driftCheckInterval, result.RequeueAfter)
+	}
+	if !conn.applyConfigCall {
+		t.Error("expected ApplyConfig to be called on drift")
+	}
+}
+
+func TestTalosNodeReconciler_DriftCheck_NodeOffline(t *testing.T) {
+	s := newTestScheme(t)
+	cfg := []byte("machine:\n  type: controlplane\n")
+	dialer := &fakeDialer{err: errors.New("connection refused")}
+
+	node := upToDateNode()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(node, talosconfigSecret(), savedConfigSecret(cfg)).
+		WithStatusSubresource(node).
+		Build()
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: dialer}
+
+	result, err := r.Reconcile(context.Background(), rreq("mynode", "default"))
+	if err != nil {
+		t.Fatalf("expected no error for offline node, got: %v", err)
+	}
+	if result.RequeueAfter != driftCheckInterval {
+		t.Errorf("expected RequeueAfter=%v, got %v", driftCheckInterval, result.RequeueAfter)
+	}
+
+	// Node status must be untouched — offline is not an error.
+	var updated v1alpha1.TalosNode
+	_ = c.Get(context.Background(), types.NamespacedName{Name: "mynode", Namespace: "default"}, &updated)
+	if updated.Status.Phase != v1alpha1.TalosNodePhaseReady {
+		t.Errorf("expected node to remain Ready when offline, got phase %q", updated.Status.Phase)
+	}
+}
+
+func TestTalosNodeReconciler_DriftCheck_Disabled(t *testing.T) {
+	s := newTestScheme(t)
+	conn := &fakeConnection{}
+
+	disabled := false
+	node := upToDateNode()
+	node.Spec.DriftDetection = &disabled
+
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(node).
+		WithStatusSubresource(node).
+		Build()
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: &fakeDialer{conn: conn}}
+
+	result, err := r.Reconcile(context.Background(), rreq("mynode", "default"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue when drift detection disabled, got %v", result.RequeueAfter)
+	}
+	if conn.machineConfigCall {
+		t.Error("expected GetMachineConfig not called when drift detection disabled")
+	}
+}
+
 func TestTalosNodeReconciler_ApplyConfigError(t *testing.T) {
 	s := newTestScheme(t)
 	conn := &fakeConnection{applyErr: errors.New("connection refused")}
@@ -806,6 +958,219 @@ func TestTalosNodeReconciler_HandleDeletion(t *testing.T) {
 	}
 }
 
+// ── TalosNodeReconciler — ControlPlane deletion / etcd leave ─────────────────
+
+// A ControlPlane node being deleted should trigger EtcdLeave on itself; on
+// success the finalizer is removed and the config secret is deleted.
+func TestTalosNodeReconciler_HandleDeletion_ControlPlane_GracefulLeave(t *testing.T) {
+	s := newTestScheme(t)
+	now := metav1.Now()
+	conn := &fakeConnection{}
+	dialer := &fakeDialer{conn: conn}
+
+	cluster := &v1alpha1.TalosCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec:       v1alpha1.TalosClusterSpec{Endpoints: []string{"10.0.0.1", "10.0.0.2"}},
+	}
+	node := &v1alpha1.TalosNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "cp-node",
+			Namespace:         "default",
+			Finalizers:        []string{cleanupFinalizer},
+			DeletionTimestamp: &now,
+		},
+		Spec: v1alpha1.TalosNodeSpec{
+			ClusterRef: "mycluster",
+			NodeIP:     "10.0.0.2",
+			Role:       v1alpha1.TalosNodeRoleControlPlane,
+		},
+	}
+	configSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "cp-node-config", Namespace: "default"}}
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(cluster, talosconfigSecret(), node, configSecret).
+		WithStatusSubresource(node).
+		Build()
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: dialer}
+
+	_, err := r.Reconcile(context.Background(), rreq("cp-node", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if !conn.etcdLeaveCall {
+		t.Error("expected EtcdLeave to be called on ControlPlane deletion")
+	}
+	var sec corev1.Secret
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cp-node-config", Namespace: "default"}, &sec); err == nil {
+		t.Error("expected config secret to be deleted after etcd leave")
+	}
+}
+
+// When EtcdLeave fails and DeletionAttempts is below the threshold, the
+// controller must requeue and increment the counter.
+func TestTalosNodeReconciler_HandleDeletion_ControlPlane_RetryAfterLeaveFailure(t *testing.T) {
+	s := newTestScheme(t)
+	now := metav1.Now()
+	conn := &fakeConnection{etcdLeaveErr: errors.New("connection refused")}
+	dialer := &fakeDialer{conn: conn}
+
+	cluster := &v1alpha1.TalosCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec:       v1alpha1.TalosClusterSpec{Endpoints: []string{"10.0.0.1", "10.0.0.2"}},
+	}
+	node := &v1alpha1.TalosNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "cp-node",
+			Namespace:         "default",
+			Finalizers:        []string{cleanupFinalizer},
+			DeletionTimestamp: &now,
+		},
+		Spec: v1alpha1.TalosNodeSpec{
+			ClusterRef: "mycluster",
+			NodeIP:     "10.0.0.2",
+			Role:       v1alpha1.TalosNodeRoleControlPlane,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(cluster, talosconfigSecret(), node).
+		WithStatusSubresource(node).
+		Build()
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: dialer}
+
+	result, err := r.Reconcile(context.Background(), rreq("cp-node", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected RequeueAfter set after etcd leave failure")
+	}
+
+	var got v1alpha1.TalosNode
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cp-node", Namespace: "default"}, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.DeletionAttempts != 1 {
+		t.Errorf("expected DeletionAttempts=1, got %d", got.Status.DeletionAttempts)
+	}
+	// Finalizer must still be present — cleanup must not proceed.
+	if !containsStr(got.Finalizers, cleanupFinalizer) {
+		t.Error("expected finalizer to remain while etcd leave is pending")
+	}
+}
+
+// After etcdLeaveMaxAttempts failures, the controller escalates to
+// EtcdForceRemove via a surviving peer and then proceeds with cleanup.
+func TestTalosNodeReconciler_HandleDeletion_ControlPlane_ForceRemoveAfterRetries(t *testing.T) {
+	s := newTestScheme(t)
+	now := metav1.Now()
+	conn := &fakeConnection{}
+	dialer := &fakeDialer{conn: conn}
+
+	cluster := &v1alpha1.TalosCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "mycluster", Namespace: "default"},
+		Spec:       v1alpha1.TalosClusterSpec{Endpoints: []string{"10.0.0.1", "10.0.0.2"}},
+	}
+	node := &v1alpha1.TalosNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "cp-node",
+			Namespace:         "default",
+			Finalizers:        []string{cleanupFinalizer},
+			DeletionTimestamp: &now,
+		},
+		Spec: v1alpha1.TalosNodeSpec{
+			ClusterRef: "mycluster",
+			NodeIP:     "10.0.0.2",
+			Role:       v1alpha1.TalosNodeRoleControlPlane,
+		},
+		Status: v1alpha1.TalosNodeStatus{
+			DeletionAttempts: etcdLeaveMaxAttempts, // already exhausted graceful attempts
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(cluster, talosconfigSecret(), node).
+		WithStatusSubresource(node).
+		Build()
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: dialer}
+
+	_, err := r.Reconcile(context.Background(), rreq("cp-node", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if !conn.etcdForceRemoveCall {
+		t.Error("expected EtcdForceRemove to be called after max graceful attempts")
+	}
+	if conn.etcdLeaveCall {
+		t.Error("expected EtcdLeave NOT called when max attempts already reached")
+	}
+	// Cleanup must proceed: finalizer removed (object deleted by fake client).
+}
+
+// A Worker node deletion must skip all etcd operations.
+func TestTalosNodeReconciler_HandleDeletion_Worker_SkipsEtcd(t *testing.T) {
+	s := newTestScheme(t)
+	now := metav1.Now()
+	conn := &fakeConnection{}
+	dialer := &fakeDialer{conn: conn}
+
+	node := &v1alpha1.TalosNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "worker-node",
+			Namespace:         "default",
+			Finalizers:        []string{cleanupFinalizer},
+			DeletionTimestamp: &now,
+		},
+		Spec: v1alpha1.TalosNodeSpec{
+			ClusterRef: "mycluster",
+			NodeIP:     "10.0.0.5",
+			Role:       v1alpha1.TalosNodeRoleWorker,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(node).Build()
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: dialer}
+
+	_, err := r.Reconcile(context.Background(), rreq("worker-node", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if conn.etcdLeaveCall || conn.etcdForceRemoveCall {
+		t.Error("expected no etcd calls for Worker node deletion")
+	}
+}
+
+// When the cluster is not found during CP deletion, etcd leave is skipped and
+// cleanup proceeds — prevents blocking deletion if the cluster was removed first.
+func TestTalosNodeReconciler_HandleDeletion_ControlPlane_ClusterGone(t *testing.T) {
+	s := newTestScheme(t)
+	now := metav1.Now()
+	conn := &fakeConnection{}
+	dialer := &fakeDialer{conn: conn}
+
+	node := &v1alpha1.TalosNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "cp-node",
+			Namespace:         "default",
+			Finalizers:        []string{cleanupFinalizer},
+			DeletionTimestamp: &now,
+		},
+		Spec: v1alpha1.TalosNodeSpec{
+			ClusterRef: "gone-cluster",
+			NodeIP:     "10.0.0.2",
+			Role:       v1alpha1.TalosNodeRoleControlPlane,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(node).Build()
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: dialer}
+
+	_, err := r.Reconcile(context.Background(), rreq("cp-node", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v; expected clean deletion when cluster is gone", err)
+	}
+	if conn.etcdLeaveCall || conn.etcdForceRemoveCall {
+		t.Error("expected no etcd calls when cluster is not found")
+	}
+}
+
 // ── TalosClusterBootstrapReconciler ──────────────────────────────────────────
 
 func TestTalosClusterBootstrapReconciler_NotFound(t *testing.T) {
@@ -817,7 +1182,7 @@ func TestTalosClusterBootstrapReconciler_NotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if result.Requeue || result.RequeueAfter != 0 {
+	if result.RequeueAfter != 0 {
 		t.Errorf("expected no requeue, got %+v", result)
 	}
 }
@@ -849,7 +1214,7 @@ func TestTalosClusterBootstrapReconciler_AlreadyCompleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
-	if result.Requeue || result.RequeueAfter != 0 {
+	if result.RequeueAfter != 0 {
 		t.Error("expected no requeue for completed bootstrap")
 	}
 	if conn.bootstrapCall || conn.applyConfigCall {

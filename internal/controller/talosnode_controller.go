@@ -3,7 +3,9 @@ package controller
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
+	"time"
 
 	"github.com/yuriy-kovalchuk/yk-talos-management/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -34,10 +36,17 @@ type TalosNodeReconciler struct {
 	Recorder record.EventRecorder
 }
 
-func (r *TalosNodeReconciler) event(obj client.Object, eventType, reason, msg string) {
-	if r.Recorder != nil {
-		r.Recorder.Event(obj, eventType, reason, msg)
+func (r *TalosNodeReconciler) setError(ctx context.Context, node *v1alpha1.TalosNode, err error) (ctrl.Result, error) {
+	l := log.FromContext(ctx)
+	l.Error(err, "apply config failed", "node", node.Name, "ip", node.Spec.NodeIP, "retry", node.Status.RetryCount+1)
+	node.Status.Phase = v1alpha1.TalosNodePhaseError
+	node.Status.RetryCount++
+	node.Status.Message = err.Error()
+	emitEvent(r.Recorder, node, corev1.EventTypeWarning, "ApplyFailed", err.Error())
+	if updateErr := r.Status().Update(ctx, node); updateErr != nil {
+		l.Error(updateErr, "update error status")
 	}
+	return ctrl.Result{RequeueAfter: config.GetRetryDelay(node.Status.RetryCount)}, nil
 }
 
 func (r *TalosNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -60,27 +69,25 @@ func (r *TalosNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	if isNodeUpToDate(&node) {
-		l.Info("Node up-to-date, skipping", "generation", node.Generation)
+		if driftEnabled(&node) {
+			return r.checkDrift(ctx, &node)
+		}
+		l.Info("Node up-to-date, drift detection disabled", "generation", node.Generation)
 		return ctrl.Result{}, nil
 	}
 
 	if err := r.applyConfig(ctx, &node); err != nil {
 		if talos.IsContextCancelled(err) {
-			return ctrl.Result{Requeue: true}, nil
+			return ctrl.Result{}, nil
 		}
-		l.Error(err, "apply config failed", "node", node.Name, "ip", node.Spec.NodeIP, "retry", node.Status.RetryCount+1)
-		node.Status.Phase = v1alpha1.TalosNodePhaseError
-		node.Status.RetryCount++
-		node.Status.Message = err.Error()
-		r.event(&node, corev1.EventTypeWarning, "ApplyFailed", err.Error())
-		if updateErr := r.Status().Update(ctx, &node); updateErr != nil {
-			l.Error(updateErr, "update error status")
-		}
-		return ctrl.Result{RequeueAfter: config.GetRetryDelay(node.Status.RetryCount)}, nil
+		return r.setError(ctx, &node, err)
 	}
 
 	l.Info("Node configured", "ip", node.Spec.NodeIP)
-	r.event(&node, corev1.EventTypeNormal, "Applied", "Machine configuration applied successfully")
+	emitEvent(r.Recorder, &node, corev1.EventTypeNormal, "Applied", "Machine configuration applied successfully")
+	if driftEnabled(&node) {
+		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -91,18 +98,109 @@ func isNodeUpToDate(node *v1alpha1.TalosNode) bool {
 		talos.HasCondition(node.Status.Conditions, v1alpha1.TalosNodeConditionConfigApplied, metav1.ConditionTrue)
 }
 
+// driftEnabled returns true when drift detection is on (the default when unset).
+func driftEnabled(node *v1alpha1.TalosNode) bool {
+	return node.Spec.DriftDetection == nil || *node.Spec.DriftDetection
+}
+
+const (
+	etcdLeaveMaxAttempts = 3
+	etcdLeaveRetryDelay  = 90 * time.Second
+	driftCheckInterval   = 5 * time.Minute
+)
+
+// checkDrift fetches the running config from the node and compares it with the saved secret.
+// Connection failures are treated as "node offline" — logged at Info and requeued silently.
+func (r *TalosNodeReconciler) checkDrift(ctx context.Context, node *v1alpha1.TalosNode) (ctrl.Result, error) {
+	l := log.FromContext(ctx)
+
+	talosconfigSecret, err := getSecret(ctx, r.Client, clusterTalosconfigName(node.Spec.ClusterRef), node.Namespace)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	savedSecret, err := getSecret(ctx, r.Client, nodeConfigName(node.Name), node.Namespace)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	conn, err := r.Talos.Dial(ctx, talosconfigSecret.Data["talosconfig"], node.Spec.NodeIP)
+	if err != nil {
+		l.Info("drift check: node unreachable, will retry", "node", node.Name, "ip", node.Spec.NodeIP)
+		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
+	}
+	defer conn.Close() //nolint:errcheck
+
+	remoteBytes, err := conn.GetMachineConfig(ctx, node.Spec.NodeIP)
+	if err != nil {
+		l.Info("drift check: could not read remote config, will retry", "node", node.Name, "ip", node.Spec.NodeIP, "err", err)
+		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
+	}
+
+	drifted, err := configsDiffer(savedSecret.Data["config.yaml"], remoteBytes)
+	if err != nil {
+		l.Error(err, "drift check: comparison failed", "node", node.Name)
+		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
+	}
+
+	if !drifted {
+		l.V(1).Info("drift check: config in sync", "node", node.Name, "ip", node.Spec.NodeIP)
+		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
+	}
+
+	l.Info("drift detected, re-applying config", "node", node.Name, "ip", node.Spec.NodeIP)
+	emitEvent(r.Recorder, node, corev1.EventTypeWarning, "DriftDetected", "Node config drift detected, re-applying")
+
+	// Force re-apply: clear observed generation so applyConfig treats this as an update.
+	node.Status.ObservedGeneration = node.Generation - 1
+	if err := r.applyConfig(ctx, node); err != nil {
+		if talos.IsContextCancelled(err) {
+			return ctrl.Result{}, nil
+		}
+		return r.setError(ctx, node, err)
+	}
+	return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
+}
+
+// configsDiffer returns true when the two YAML documents parse to different structures.
+// Ignores comments, whitespace, and field ordering.
+func configsDiffer(local, remote []byte) (bool, error) {
+	var localMap, remoteMap map[string]interface{}
+	if err := yaml.Unmarshal(local, &localMap); err != nil {
+		return false, fmt.Errorf("parse local config: %w", err)
+	}
+	if err := yaml.Unmarshal(remote, &remoteMap); err != nil {
+		return false, fmt.Errorf("parse remote config: %w", err)
+	}
+	return !reflect.DeepEqual(localMap, remoteMap), nil
+}
+
 func (r *TalosNodeReconciler) handleDeletion(ctx context.Context, node *v1alpha1.TalosNode) (ctrl.Result, error) {
 	if !talos.ContainsFinalizer(node.Finalizers, talos.FinalizerCleanup) {
 		return ctrl.Result{}, nil
 	}
 
-	secret := &corev1.Secret{}
-	if err := r.Get(ctx, types.NamespacedName{Name: node.Name + "-config", Namespace: node.Namespace}, secret); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, err
+	if node.Spec.Role == v1alpha1.TalosNodeRoleControlPlane {
+		done, result, err := r.handleEtcdLeave(ctx, node)
+		if !done {
+			return result, err
 		}
-	} else if err := r.Delete(ctx, secret); err != nil {
+	}
+
+	secret, err := getSecret(ctx, r.Client, nodeConfigName(node.Name), node.Namespace)
+	if err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, err
+	}
+	if err == nil {
+		if delErr := r.Delete(ctx, secret); delErr != nil {
+			return ctrl.Result{}, delErr
+		}
 	}
 
 	node.Finalizers = talos.RemoveFinalizer(node.Finalizers, talos.FinalizerCleanup)
@@ -111,6 +209,97 @@ func (r *TalosNodeReconciler) handleDeletion(ctx context.Context, node *v1alpha1
 	}
 	log.FromContext(ctx).Info("Node cleaned up", "name", node.Name)
 	return ctrl.Result{}, nil
+}
+
+// handleEtcdLeave manages etcd membership removal for a departing ControlPlane node.
+// Returns (true, _, _) when the caller may proceed to cleanup, (false, result, _) to requeue.
+func (r *TalosNodeReconciler) handleEtcdLeave(ctx context.Context, node *v1alpha1.TalosNode) (bool, ctrl.Result, error) {
+	l := log.FromContext(ctx)
+
+	talosconfig, endpoints, skip, err := r.loadTalosconfig(ctx, node)
+	if err != nil {
+		return false, ctrl.Result{}, err
+	}
+	if skip {
+		return true, ctrl.Result{}, nil
+	}
+
+	if node.Status.DeletionAttempts < etcdLeaveMaxAttempts {
+		if err := r.tryEtcdLeave(ctx, node.Spec.NodeIP, talosconfig); err != nil {
+			l.Error(err, "etcd leave failed, will retry", "node", node.Name, "ip", node.Spec.NodeIP, "attempt", node.Status.DeletionAttempts+1)
+			node.Status.DeletionAttempts++
+			if updateErr := r.Status().Update(ctx, node); updateErr != nil {
+				l.Error(updateErr, "update deletion attempts status")
+			}
+			return false, ctrl.Result{RequeueAfter: etcdLeaveRetryDelay}, nil
+		}
+		l.Info("etcd leave succeeded", "node", node.Name, "ip", node.Spec.NodeIP)
+		return true, ctrl.Result{}, nil
+	}
+
+	// Max graceful attempts exceeded — force-remove via a surviving peer.
+	l.Info("etcd leave max attempts exceeded, escalating to force-remove", "node", node.Name, "ip", node.Spec.NodeIP, "attempts", node.Status.DeletionAttempts)
+	peers := survivingPeers(endpoints, node.Spec.NodeIP)
+	if len(peers) == 0 {
+		l.Info("no surviving peers available, skipping etcd force-remove", "node", node.Name)
+		return true, ctrl.Result{}, nil
+	}
+	conn, survivorEP, err := dialAny(ctx, r.Talos, talosconfig, peers)
+	if err != nil {
+		l.Error(err, "could not dial surviving peer for etcd force-remove, proceeding with cleanup", "node", node.Name)
+		return true, ctrl.Result{}, nil
+	}
+	defer conn.Close() //nolint:errcheck
+	if err := conn.EtcdForceRemove(ctx, survivorEP, node.Spec.NodeIP); err != nil {
+		l.Error(err, "etcd force-remove failed, proceeding with cleanup", "node", node.Name, "survivor", survivorEP)
+	}
+	return true, ctrl.Result{}, nil
+}
+
+// loadTalosconfig resolves the cluster and its talosconfig secret for the given node.
+// Returns skip=true when the cluster or secret is not found (caller should proceed to cleanup).
+func (r *TalosNodeReconciler) loadTalosconfig(ctx context.Context, node *v1alpha1.TalosNode) (talosconfig []byte, endpoints []string, skip bool, err error) {
+	l := log.FromContext(ctx)
+
+	cluster := &v1alpha1.TalosCluster{}
+	if err := r.Get(ctx, types.NamespacedName{Name: node.Spec.ClusterRef, Namespace: node.Namespace}, cluster); err != nil {
+		if apierrors.IsNotFound(err) {
+			l.Info("cluster not found, skipping etcd leave", "node", node.Name, "cluster", node.Spec.ClusterRef)
+			return nil, nil, true, nil
+		}
+		return nil, nil, false, err
+	}
+
+	secret, err := getSecret(ctx, r.Client, clusterTalosconfigName(cluster.Name), node.Namespace)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			l.Info("talosconfig secret not found, skipping etcd leave", "node", node.Name)
+			return nil, nil, true, nil
+		}
+		return nil, nil, false, err
+	}
+
+	return secret.Data["talosconfig"], cluster.Spec.Endpoints, false, nil
+}
+
+func (r *TalosNodeReconciler) tryEtcdLeave(ctx context.Context, nodeIP string, talosconfig []byte) error {
+	conn, err := r.Talos.Dial(ctx, talosconfig, nodeIP)
+	if err != nil {
+		return fmt.Errorf("dial node: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
+	return conn.EtcdLeave(ctx, nodeIP)
+}
+
+// survivingPeers returns all endpoints except the one matching excludeIP.
+func survivingPeers(endpoints []string, excludeIP string) []string {
+	var peers []string
+	for _, ep := range endpoints {
+		if ep != excludeIP {
+			peers = append(peers, ep)
+		}
+	}
+	return peers
 }
 
 func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.TalosNode) error {
@@ -127,18 +316,18 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 		return fmt.Errorf("get cluster: %w", err)
 	}
 
-	secretName, key := cluster.Name+"-controlplane", "controlplane.yaml"
+	secretName, key := clusterControlPlaneName(cluster.Name), "controlplane.yaml"
 	if node.Spec.Role == v1alpha1.TalosNodeRoleWorker {
-		secretName, key = cluster.Name+"-worker", "worker.yaml"
+		secretName, key = clusterWorkerName(cluster.Name), "worker.yaml"
 	}
 
-	secret := &corev1.Secret{}
-	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: node.Namespace}, secret); err != nil {
+	configSecret, err := getSecret(ctx, r.Client, secretName, node.Namespace)
+	if err != nil {
 		return fmt.Errorf("get config secret: %w", err)
 	}
 
 	var baseConfig map[string]interface{}
-	if err := yaml.Unmarshal(secret.Data[key], &baseConfig); err != nil {
+	if err := yaml.Unmarshal(configSecret.Data[key], &baseConfig); err != nil {
 		return fmt.Errorf("unmarshal config: %w", err)
 	}
 
@@ -170,9 +359,9 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 	if firstApply {
 		conn, err = r.Talos.DialInsecure(ctx, node.Spec.NodeIP)
 	} else {
-		talosconfigSecret := &corev1.Secret{}
-		if err := r.Get(ctx, types.NamespacedName{Name: cluster.Name + "-talosconfig", Namespace: node.Namespace}, talosconfigSecret); err != nil {
-			return fmt.Errorf("get talosconfig secret: %w", err)
+		talosconfigSecret, tcErr := getSecret(ctx, r.Client, clusterTalosconfigName(cluster.Name), node.Namespace)
+		if tcErr != nil {
+			return fmt.Errorf("get talosconfig secret: %w", tcErr)
 		}
 		conn, err = r.Talos.Dial(ctx, talosconfigSecret.Data["talosconfig"], node.Spec.NodeIP)
 	}
@@ -191,12 +380,8 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 
 	node.Status.Phase = v1alpha1.TalosNodePhaseReady
 	node.Status.Message = "Configuration applied"
-	talos.SetCondition(&node.Status.Conditions, metav1.Condition{
-		Type:    v1alpha1.TalosNodeConditionConfigApplied,
-		Status:  metav1.ConditionTrue,
-		Reason:  "Applied",
-		Message: "Configuration applied successfully",
-	})
+	talos.SetConditionStatus(&node.Status.Conditions,
+		v1alpha1.TalosNodeConditionConfigApplied, metav1.ConditionTrue, "Applied", "Configuration applied successfully")
 	now := metav1.Now()
 	node.Status.LastUpdateTime = &now
 	return r.Status().Update(ctx, node)
@@ -205,24 +390,11 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 // saveNodeConfig persists the final merged machine config (base + patches) to a secret so it
 // can be inspected for debugging and used for drift detection in the future.
 func (r *TalosNodeReconciler) saveNodeConfig(ctx context.Context, node *v1alpha1.TalosNode, configBytes []byte) error {
-	secret := &corev1.Secret{}
-	err := r.Get(ctx, types.NamespacedName{Name: node.Name + "-config", Namespace: node.Namespace}, secret)
-	if err != nil {
-		if !apierrors.IsNotFound(err) {
-			return err
-		}
-		secret = &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      node.Name + "-config",
-				Namespace: node.Namespace,
-			},
-			Type: corev1.SecretTypeOpaque,
-			Data: map[string][]byte{"config.yaml": configBytes},
-		}
-		return r.Create(ctx, secret)
-	}
-	secret.Data = map[string][]byte{"config.yaml": configBytes}
-	return r.Update(ctx, secret)
+	name := nodeConfigName(node.Name)
+	return upsertSecret(ctx, r.Client, name, node.Namespace,
+		func() *corev1.Secret { return newSecret(name, node.Namespace, "config.yaml", configBytes) },
+		func(s *corev1.Secret) { s.Data = map[string][]byte{"config.yaml": configBytes} },
+	)
 }
 
 // mergePatches deep-merges patch into base, with patch values taking precedence.

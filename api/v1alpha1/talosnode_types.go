@@ -37,12 +37,16 @@ type TalosNodeSpec struct {
 	NodeIP string `json:"nodeIP"`
 
 	Patches []string `json:"patches,omitempty"`
+
+	// +kubebuilder:default=true
+	DriftDetection *bool `json:"driftDetection,omitempty"`
 }
 
 type TalosNodeStatus struct {
-	Phase        TalosNodePhase `json:"phase,omitempty"`
-	Message      string         `json:"message,omitempty"`
-	CommonStatus `json:",inline"`
+	Phase            TalosNodePhase `json:"phase,omitempty"`
+	Message          string         `json:"message,omitempty"`
+	DeletionAttempts int32          `json:"deletionAttempts,omitempty"`
+	CommonStatus     `json:",inline"`
 }
 
 // +kubebuilder:object:root=true

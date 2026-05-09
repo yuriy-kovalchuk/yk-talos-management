@@ -32,17 +32,14 @@ import (
 // +kubebuilder:rbac:groups=talos.yuriykovalchuk.dev,resources=talosnodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;delete
 
+// nodeReadyDelay is how long to wait before re-checking whether a ControlPlane node is Ready.
+const nodeReadyDelay = 10 * time.Second
+
 type TalosClusterBootstrapReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Talos    TalosDialer
 	Recorder record.EventRecorder
-}
-
-func (r *TalosClusterBootstrapReconciler) event(obj client.Object, eventType, reason, msg string) {
-	if r.Recorder != nil {
-		r.Recorder.Event(obj, eventType, reason, msg)
-	}
 }
 
 func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -83,15 +80,10 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 	// Without this guard, bootstrap fires while nodes are still applying their config
 	// (maintenance-mode cert), causing a TLS verification failure that grows the
 	// exponential backoff to minutes.
-	if ready, err := r.readyControlPlaneCount(ctx, bootstrap.Namespace, bootstrap.Spec.ClusterRef); err != nil {
-		return r.setError(ctx, &bootstrap, fmt.Errorf("list nodes: %w", err))
-	} else if ready == 0 {
-		bootstrap.Status.Phase = v1alpha1.TalosClusterBootstrapPhaseWaitingForNodes
-		bootstrap.Status.Message = "Waiting for at least one control plane node to reach Ready phase"
-		if err := r.Status().Update(ctx, &bootstrap); err != nil {
-			return ctrl.Result{}, fmt.Errorf("update status: %w", err)
-		}
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	if result, ready, err := r.waitForReadyNodes(ctx, &bootstrap); err != nil {
+		return r.setError(ctx, &bootstrap, err)
+	} else if !ready {
+		return result, nil
 	}
 
 	// Capture state before any mutations so idempotency checks reflect the
@@ -102,26 +94,20 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 	bootstrap.Status.ObservedGeneration = bootstrap.Generation
 	bootstrap.Status.Phase = v1alpha1.TalosClusterBootstrapPhaseBootstrapping
 	if !alreadyBootstrapped {
-		talos.SetCondition(&bootstrap.Status.Conditions, metav1.Condition{
-			Type:    v1alpha1.TalosClusterBootstrapConditionBootstrapped,
-			Status:  metav1.ConditionFalse,
-			Reason:  "Bootstrapping",
-			Message: "Bootstrapping cluster",
-		})
+		talos.SetConditionStatus(&bootstrap.Status.Conditions,
+			v1alpha1.TalosClusterBootstrapConditionBootstrapped, metav1.ConditionFalse,
+			"Bootstrapping", "Bootstrapping cluster")
 	}
-	talos.SetCondition(&bootstrap.Status.Conditions, metav1.Condition{
-		Type:    v1alpha1.TalosClusterBootstrapConditionKubeconfig,
-		Status:  metav1.ConditionFalse,
-		Reason:  "Retrieving",
-		Message: "Retrieving kubeconfig",
-	})
+	talos.SetConditionStatus(&bootstrap.Status.Conditions,
+		v1alpha1.TalosClusterBootstrapConditionKubeconfig, metav1.ConditionFalse,
+		"Retrieving", "Retrieving kubeconfig")
 	if err := r.Status().Update(ctx, &bootstrap); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update status: %w", err)
 	}
 
 	// Load talosconfig directly from the Kubernetes secret bytes — no temp file needed.
-	talosconfigSecret := &corev1.Secret{}
-	if err := r.Get(ctx, types.NamespacedName{Name: cluster.Name + "-talosconfig", Namespace: bootstrap.Namespace}, talosconfigSecret); err != nil {
+	talosconfigSecret, err := getSecret(ctx, r.Client, clusterTalosconfigName(cluster.Name), bootstrap.Namespace)
+	if err != nil {
 		return r.setError(ctx, &bootstrap, fmt.Errorf("get talosconfig secret: %w", err))
 	}
 	// Bootstrap must happen on endpoints[0] — calling it on another node creates a separate etcd
@@ -134,43 +120,46 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 		dialErr  error
 	)
 	if alreadyBootstrapped {
-		conn, dialedTo, dialErr = r.dialAny(ctx, talosconfig, cluster.Spec.Endpoints)
+		conn, dialedTo, dialErr = dialAny(ctx, r.Talos, talosconfig, cluster.Spec.Endpoints)
 	} else {
 		dialedTo = cluster.Spec.Endpoints[0]
 		conn, dialErr = r.Talos.Dial(ctx, talosconfig, dialedTo)
 	}
 	if dialErr != nil {
+		if talos.IsContextCancelled(dialErr) {
+			return ctrl.Result{}, nil
+		}
 		return r.setError(ctx, &bootstrap, fmt.Errorf("create client: %w", dialErr))
 	}
 	defer conn.Close() //nolint:errcheck
 
 	if !alreadyBootstrapped {
 		if err := conn.Bootstrap(ctx, dialedTo); err != nil {
+			if talos.IsContextCancelled(err) {
+				return ctrl.Result{}, nil
+			}
 			return r.setError(ctx, &bootstrap, fmt.Errorf("bootstrap: %w", err))
 		}
-		talos.SetCondition(&bootstrap.Status.Conditions, metav1.Condition{
-			Type:    v1alpha1.TalosClusterBootstrapConditionBootstrapped,
-			Status:  metav1.ConditionTrue,
-			Reason:  "Bootstrapped",
-			Message: "Cluster bootstrapped",
-		})
-		r.event(&bootstrap, corev1.EventTypeNormal, "Bootstrapped", "etcd bootstrap triggered successfully")
+		talos.SetConditionStatus(&bootstrap.Status.Conditions,
+			v1alpha1.TalosClusterBootstrapConditionBootstrapped, metav1.ConditionTrue,
+			"Bootstrapped", "Cluster bootstrapped")
+		emitEvent(r.Recorder, &bootstrap, corev1.EventTypeNormal, "Bootstrapped", "etcd bootstrap triggered successfully")
 		if err := r.Status().Update(ctx, &bootstrap); err != nil {
-			return ctrl.Result{}, fmt.Errorf("update status: %w", err)
+			return ctrl.Result{}, fmt.Errorf("update bootstrapped status: %w", err)
 		}
 	}
 
 	kubeconfig, err := conn.GetKubeconfig(ctx, dialedTo)
 	if err != nil {
+		if talos.IsContextCancelled(err) {
+			return ctrl.Result{}, nil
+		}
 		l.Error(err, "get kubeconfig failed", "endpoint", dialedTo, "retry", bootstrap.Status.RetryCount+1)
 		bootstrap.Status.RetryCount++
 		bootstrap.Status.Phase = v1alpha1.TalosClusterBootstrapPhaseWaitingForKubeconfig
-		talos.SetCondition(&bootstrap.Status.Conditions, metav1.Condition{
-			Type:    v1alpha1.TalosClusterBootstrapConditionKubeconfig,
-			Status:  metav1.ConditionFalse,
-			Reason:  "Retrying",
-			Message: fmt.Sprintf("Retrying (attempt %d)", bootstrap.Status.RetryCount),
-		})
+		talos.SetConditionStatus(&bootstrap.Status.Conditions,
+			v1alpha1.TalosClusterBootstrapConditionKubeconfig, metav1.ConditionFalse,
+			"Retrying", fmt.Sprintf("Retrying (attempt %d)", bootstrap.Status.RetryCount))
 		if updateErr := r.Status().Update(ctx, &bootstrap); updateErr != nil {
 			l.Error(updateErr, "update retry status")
 		}
@@ -178,36 +167,59 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	if err := r.saveKubeconfig(ctx, cluster, kubeconfig); err != nil {
-		log.FromContext(ctx).Error(err, "save kubeconfig")
+		l.Error(err, "save kubeconfig")
 	}
 
 	bootstrap.Status.Phase = v1alpha1.TalosClusterBootstrapPhaseCompleted
 	bootstrap.Status.Message = "Bootstrap completed"
-	talos.SetCondition(&bootstrap.Status.Conditions, metav1.Condition{
-		Type:    v1alpha1.TalosClusterBootstrapConditionKubeconfig,
-		Status:  metav1.ConditionTrue,
-		Reason:  "Retrieved",
-		Message: "Kubeconfig retrieved",
-	})
+	talos.SetConditionStatus(&bootstrap.Status.Conditions,
+		v1alpha1.TalosClusterBootstrapConditionKubeconfig, metav1.ConditionTrue,
+		"Retrieved", "Kubeconfig retrieved")
 	if err := r.Status().Update(ctx, &bootstrap); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update final status: %w", err)
 	}
 
-	r.event(&bootstrap, corev1.EventTypeNormal, "Completed", "Bootstrap complete; kubeconfig stored")
+	emitEvent(r.Recorder, &bootstrap, corev1.EventTypeNormal, "Completed", "Bootstrap complete; kubeconfig stored")
 	l.Info("Bootstrap complete", "endpoint", dialedTo)
 	return ctrl.Result{}, nil
 }
 
+// waitForReadyNodes checks whether at least one ControlPlane node for this bootstrap's
+// cluster is Ready. Returns (result, false, nil) to signal the caller should requeue,
+// or (_, true, nil) to signal reconciliation can proceed.
+func (r *TalosClusterBootstrapReconciler) waitForReadyNodes(ctx context.Context, bootstrap *v1alpha1.TalosClusterBootstrap) (ctrl.Result, bool, error) {
+	ready, err := r.readyControlPlaneCount(ctx, bootstrap.Namespace, bootstrap.Spec.ClusterRef)
+	if err != nil {
+		return ctrl.Result{}, false, fmt.Errorf("list nodes: %w", err)
+	}
+	if ready > 0 {
+		return ctrl.Result{}, true, nil
+	}
+	bootstrap.Status.Phase = v1alpha1.TalosClusterBootstrapPhaseWaitingForNodes
+	bootstrap.Status.Message = "Waiting for at least one control plane node to reach Ready phase"
+	if err := r.Status().Update(ctx, bootstrap); err != nil {
+		return ctrl.Result{}, false, fmt.Errorf("update status: %w", err)
+	}
+	return ctrl.Result{RequeueAfter: nodeReadyDelay}, false, nil
+}
+
 func (r *TalosClusterBootstrapReconciler) handleDeletion(ctx context.Context, bootstrap *v1alpha1.TalosClusterBootstrap) (ctrl.Result, error) {
+	l := log.FromContext(ctx)
 	if !talos.ContainsFinalizer(bootstrap.Finalizers, talos.FinalizerCleanup) {
 		return ctrl.Result{}, nil
 	}
 
 	cluster := &v1alpha1.TalosCluster{}
-	if err := r.Get(ctx, types.NamespacedName{Name: bootstrap.Spec.ClusterRef, Namespace: bootstrap.Namespace}, cluster); err == nil {
-		secret := &corev1.Secret{}
-		if err := r.Get(ctx, types.NamespacedName{Name: cluster.Name + "-kubeconfig", Namespace: cluster.Namespace}, secret); err == nil {
-			_ = r.Delete(ctx, secret)
+	if err := r.Get(ctx, types.NamespacedName{Name: bootstrap.Spec.ClusterRef, Namespace: bootstrap.Namespace}, cluster); err != nil {
+		if !apierrors.IsNotFound(err) {
+			l.Error(err, "get cluster for kubeconfig cleanup", "cluster", bootstrap.Spec.ClusterRef)
+		}
+	} else {
+		secret, err := getSecret(ctx, r.Client, clusterKubeconfigName(cluster.Name), cluster.Namespace)
+		if err == nil {
+			if delErr := r.Delete(ctx, secret); delErr != nil && !apierrors.IsNotFound(delErr) {
+				return ctrl.Result{}, delErr
+			}
 		}
 	}
 
@@ -215,42 +227,33 @@ func (r *TalosClusterBootstrapReconciler) handleDeletion(ctx context.Context, bo
 	if err := r.Update(ctx, bootstrap); err != nil {
 		return ctrl.Result{}, err
 	}
-	log.FromContext(ctx).Info("Bootstrap cleaned up", "name", bootstrap.Name)
+	l.Info("Bootstrap cleaned up", "name", bootstrap.Name)
 	return ctrl.Result{}, nil
 }
 
 func (r *TalosClusterBootstrapReconciler) saveKubeconfig(ctx context.Context, cluster *v1alpha1.TalosCluster, kubeconfig []byte) error {
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      cluster.Name + "-kubeconfig",
-			Namespace: cluster.Namespace,
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "talos.yuriykovalchuk.dev/v1alpha1",
-				Kind:       "TalosCluster",
-				Name:       cluster.Name,
-				UID:        cluster.UID,
-				Controller: ptr.To(true),
-			}},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{"kubeconfig": kubeconfig},
+	name := clusterKubeconfigName(cluster.Name)
+	newFn := func() *corev1.Secret {
+		s := newSecret(name, cluster.Namespace, "kubeconfig", kubeconfig)
+		s.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: "talos.yuriykovalchuk.dev/v1alpha1",
+			Kind:       "TalosCluster",
+			Name:       cluster.Name,
+			UID:        cluster.UID,
+			Controller: ptr.To(true),
+		}}
+		return s
 	}
-
-	var existing corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Name: secret.Name, Namespace: secret.Namespace}, &existing); err != nil {
-		if apierrors.IsNotFound(err) {
-			return r.Create(ctx, secret)
-		}
-		return err
-	}
-	existing.Data["kubeconfig"] = kubeconfig
-	return r.Update(ctx, &existing)
+	return upsertSecret(ctx, r.Client, name, cluster.Namespace,
+		newFn,
+		func(s *corev1.Secret) { s.Data["kubeconfig"] = kubeconfig },
+	)
 }
 
 func (r *TalosClusterBootstrapReconciler) setError(ctx context.Context, bootstrap *v1alpha1.TalosClusterBootstrap, err error) (ctrl.Result, error) {
 	bootstrap.Status.Phase = v1alpha1.TalosClusterBootstrapPhaseError
 	bootstrap.Status.Message = err.Error()
-	r.event(bootstrap, corev1.EventTypeWarning, "Failed", err.Error())
+	emitEvent(r.Recorder, bootstrap, corev1.EventTypeWarning, "Failed", err.Error())
 	if updateErr := r.Status().Update(ctx, bootstrap); updateErr != nil {
 		log.FromContext(ctx).Error(updateErr, "update error status")
 	}
@@ -313,20 +316,6 @@ func nodeReadyPredicate() predicate.Predicate {
 		DeleteFunc:  func(event.DeleteEvent) bool { return false },
 		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
-}
-
-// dialAny tries each endpoint in order and returns the first successful connection.
-// Used for operations that can target any available control plane (e.g. GetKubeconfig).
-func (r *TalosClusterBootstrapReconciler) dialAny(ctx context.Context, talosconfig []byte, endpoints []string) (TalosConnection, string, error) {
-	var lastErr error
-	for _, ep := range endpoints {
-		conn, err := r.Talos.Dial(ctx, talosconfig, ep)
-		if err == nil {
-			return conn, ep, nil
-		}
-		lastErr = fmt.Errorf("dial %s: %w", ep, err)
-	}
-	return nil, "", lastErr
 }
 
 func (r *TalosClusterBootstrapReconciler) SetupWithManager(mgr ctrl.Manager) error {

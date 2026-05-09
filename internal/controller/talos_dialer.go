@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/yuriy-kovalchuk/yk-talos-management/internal/talos"
 )
@@ -17,6 +18,9 @@ type TalosConnection interface {
 	ApplyConfig(ctx context.Context, nodeIP string, cfg []byte) error
 	Bootstrap(ctx context.Context, endpoint string) error
 	GetKubeconfig(ctx context.Context, endpoint string) ([]byte, error)
+	GetMachineConfig(ctx context.Context, nodeIP string) ([]byte, error)
+	EtcdLeave(ctx context.Context, nodeIP string) error
+	EtcdForceRemove(ctx context.Context, survivorIP, deadNodeIP string) error
 	Close() error
 }
 
@@ -55,6 +59,31 @@ func (r *realConnection) GetKubeconfig(ctx context.Context, endpoint string) ([]
 	return talos.GetKubeconfig(ctx, r.c, endpoint)
 }
 
+func (r *realConnection) GetMachineConfig(ctx context.Context, nodeIP string) ([]byte, error) {
+	return talos.GetMachineConfig(ctx, r.c, nodeIP)
+}
+
+func (r *realConnection) EtcdLeave(ctx context.Context, nodeIP string) error {
+	return talos.EtcdLeave(ctx, r.c, nodeIP)
+}
+
+func (r *realConnection) EtcdForceRemove(ctx context.Context, survivorIP, deadNodeIP string) error {
+	return talos.EtcdForceRemoveByIP(ctx, r.c, survivorIP, deadNodeIP)
+}
+
 func (r *realConnection) Close() error {
 	return r.c.Close()
+}
+
+// dialAny tries each endpoint in order, returning the first successful connection.
+func dialAny(ctx context.Context, dialer TalosDialer, talosconfig []byte, endpoints []string) (TalosConnection, string, error) {
+	var lastErr error
+	for _, ep := range endpoints {
+		conn, err := dialer.Dial(ctx, talosconfig, ep)
+		if err == nil {
+			return conn, ep, nil
+		}
+		lastErr = fmt.Errorf("dial %s: %w", ep, err)
+	}
+	return nil, "", lastErr
 }

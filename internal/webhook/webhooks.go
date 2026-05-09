@@ -57,13 +57,20 @@ func deny(msg string) *admissionv1.AdmissionReview {
 	}
 }
 
+func unmarshalOrErr[T any](raw []byte) (T, field.ErrorList) {
+	var obj T
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return obj, field.ErrorList{field.InternalError(field.NewPath(""), err)}
+	}
+	return obj, nil
+}
+
 func TalosClusterHandler() *Handler {
 	return &Handler{validate: func(raw []byte) field.ErrorList {
-		var obj v1alpha1.TalosCluster
-		if err := json.Unmarshal(raw, &obj); err != nil {
-			return field.ErrorList{field.InternalError(field.NewPath(""), err)}
+		obj, errs := unmarshalOrErr[v1alpha1.TalosCluster](raw)
+		if errs != nil {
+			return errs
 		}
-		var errs field.ErrorList
 		if obj.Spec.ClusterName == "" {
 			errs = append(errs, field.Required(field.NewPath("spec", "clusterName"), ""))
 		}
@@ -76,11 +83,10 @@ func TalosClusterHandler() *Handler {
 
 func TalosNodeHandler() *Handler {
 	return &Handler{validate: func(raw []byte) field.ErrorList {
-		var obj v1alpha1.TalosNode
-		if err := json.Unmarshal(raw, &obj); err != nil {
-			return field.ErrorList{field.InternalError(field.NewPath(""), err)}
+		obj, errs := unmarshalOrErr[v1alpha1.TalosNode](raw)
+		if errs != nil {
+			return errs
 		}
-		var errs field.ErrorList
 		if obj.Spec.ClusterRef == "" {
 			errs = append(errs, field.Required(field.NewPath("spec", "clusterRef"), ""))
 		}
@@ -97,11 +103,10 @@ func TalosNodeHandler() *Handler {
 
 func TalosClusterBootstrapHandler() *Handler {
 	return &Handler{validate: func(raw []byte) field.ErrorList {
-		var obj v1alpha1.TalosClusterBootstrap
-		if err := json.Unmarshal(raw, &obj); err != nil {
-			return field.ErrorList{field.InternalError(field.NewPath(""), err)}
+		obj, errs := unmarshalOrErr[v1alpha1.TalosClusterBootstrap](raw)
+		if errs != nil {
+			return errs
 		}
-		var errs field.ErrorList
 		if obj.Spec.ClusterRef == "" {
 			errs = append(errs, field.Required(field.NewPath("spec", "clusterRef"), ""))
 		}

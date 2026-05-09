@@ -5,8 +5,10 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
@@ -30,6 +32,8 @@ type ClusterConfigs struct {
 	Talosconfig  []byte
 }
 
+const defaultOperationTimeout = 60 * time.Second
+
 // OperationTimeout is the per-call deadline applied to Talos gRPC operations
 // (ApplyConfig, Bootstrap, GetKubeconfig). Defaults to 60 s; override via
 // TALOS_OPERATION_TIMEOUT env var (seconds) or set directly in tests.
@@ -39,7 +43,7 @@ var OperationTimeout = func() time.Duration {
 			return time.Duration(n) * time.Second
 		}
 	}
-	return 60 * time.Second
+	return defaultOperationTimeout
 }()
 
 // withTimeout wraps ctx with OperationTimeout when non-zero.
@@ -194,4 +198,62 @@ func GetKubeconfig(ctx context.Context, c *Client, endpoint string) ([]byte, err
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 	return c.Kubeconfig(talosclient.WithNode(ctx, endpoint))
+}
+
+// GetMachineConfig reads the running machine config from the node's state partition.
+func GetMachineConfig(ctx context.Context, c *Client, nodeIP string) ([]byte, error) {
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
+
+	r, err := c.Read(talosclient.WithNode(ctx, nodeIP), constants.StateMountPoint+"/"+constants.ConfigFilename)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close() //nolint:errcheck
+	return io.ReadAll(r)
+}
+
+// EtcdLeave instructs the given node to remove itself from the etcd cluster.
+// Called on the departing node during graceful removal.
+func EtcdLeave(ctx context.Context, c *Client, nodeIP string) error {
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
+	return c.EtcdLeaveCluster(talosclient.WithNode(ctx, nodeIP), &machineapi.EtcdLeaveClusterRequest{})
+}
+
+// EtcdForceRemoveByIP lists etcd members via survivorIP, finds the member whose
+// peer URL contains deadNodeIP, and removes it by ID.
+// Called on a surviving node when the departing node is unreachable.
+func EtcdForceRemoveByIP(ctx context.Context, c *Client, survivorIP, deadNodeIP string) error {
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
+
+	resp, err := c.EtcdMemberList(talosclient.WithNode(ctx, survivorIP), &machineapi.EtcdMemberListRequest{})
+	if err != nil {
+		return fmt.Errorf("list etcd members: %w", err)
+	}
+
+	memberID := findEtcdMemberID(resp.GetMessages(), deadNodeIP)
+	if memberID == 0 {
+		return fmt.Errorf("etcd member with IP %s not found in membership list", deadNodeIP)
+	}
+
+	return c.EtcdRemoveMemberByID(talosclient.WithNode(ctx, survivorIP), &machineapi.EtcdRemoveMemberByIDRequest{
+		MemberId: memberID,
+	})
+}
+
+// findEtcdMemberID scans member list messages and returns the ID of the member
+// whose peer URL contains deadNodeIP, or 0 if not found.
+func findEtcdMemberID(messages []*machineapi.EtcdMembers, deadNodeIP string) uint64 {
+	for _, msg := range messages {
+		for _, m := range msg.GetMembers() {
+			for _, peerURL := range m.GetPeerUrls() {
+				if strings.Contains(peerURL, deadNodeIP) {
+					return m.GetId()
+				}
+			}
+		}
+	}
+	return 0
 }

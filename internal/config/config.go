@@ -7,6 +7,11 @@ import (
 	"time"
 )
 
+const (
+	jitterFactor     = 0.1 // ±10% noise applied to each retry delay
+	maxExponentShift = 10  // caps 2^n before overflow; 2^10 × base already exceeds RetryMaxDelay
+)
+
 var (
 	RetryBaseDelay = getDurationEnv("RETRY_BASE_DELAY", 5, time.Second)
 	RetryMaxDelay  = getDurationEnv("RETRY_MAX_DELAY", 300, time.Second)
@@ -28,8 +33,8 @@ func GetRetryDelay(retryCount int32) time.Duration {
 		return jitter(RetryBaseDelay)
 	}
 	shift := retryCount - 1
-	if shift > 10 {
-		shift = 10 // prevent overflow: 2^10 is the practical ceiling before the max cap kicks in
+	if shift > maxExponentShift {
+		shift = maxExponentShift
 	}
 	delay := RetryBaseDelay * (1 << shift)
 	if delay > RetryMaxDelay {
@@ -40,6 +45,6 @@ func GetRetryDelay(retryCount int32) time.Duration {
 
 // jitter adds ±10% random noise to d.
 func jitter(d time.Duration) time.Duration {
-	factor := 1.0 + 0.1*(rand.Float64()*2-1) //nolint:gosec
+	factor := 1.0 + jitterFactor*(rand.Float64()*2-1) //nolint:gosec
 	return time.Duration(float64(d) * factor)
 }

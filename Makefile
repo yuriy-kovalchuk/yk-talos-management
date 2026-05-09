@@ -2,7 +2,7 @@
         kind-up kind-down kind-deploy \
         controller-gen \
         docker-build docker-push buildx-setup \
-        install-hooks \
+        install-hooks deps-check \
         help
 
 # ── Variables ─────────────────────────────────────────────────────────────────
@@ -49,6 +49,10 @@ lint:
 ## tidy: tidy go modules
 tidy:
 	go mod tidy
+
+## deps-check: list direct dependencies that have newer versions available
+deps-check:
+	@go list -u -m -f '{{if and (not .Indirect) .Update}}{{.Path}}  {{.Version}} → {{.Update.Version}}{{end}}' all | grep -v "^$$" || echo "All direct dependencies are up to date."
 
 ## test: run all tests
 test:
