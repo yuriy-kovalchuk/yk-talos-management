@@ -58,10 +58,13 @@ jobs:
       - name: Build
         run: make build
 
-  # ── Docker: build image (no push) ─────────────────────────────────────────
+  # ── Docker: build image + Trivy image scan ────────────────────────────────
   docker:
     name: Docker build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v4
 
@@ -73,8 +76,26 @@ jobs:
         with:
           context: .
           push: false
+          load: true
+          tags: yk-talos-management:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Run Trivy image scanner
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: yk-talos-management:${{ github.sha }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN
+          limit-severities-for-sarif: true
+
+      - name: Upload results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
 
   # ── Helm: lint + template render ──────────────────────────────────────────
   helm:
