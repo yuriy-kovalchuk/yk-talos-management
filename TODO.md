@@ -17,7 +17,6 @@ The operator is functional end-to-end:
 ### Must Have
 
 - [ ] Add `CONTRIBUTING.md` — contribution guidelines
-- [ ] Add `SECURITY.md` — vulnerability reporting policy
 - [ ] Webhook TLS — generate certs, create secret, mount in deployment, add CA bundle to webhook config
 - [ ] Integration tests — full controller lifecycle against envtest
 
