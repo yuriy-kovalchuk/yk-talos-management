@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/yuriy-kovalchuk/yk-talos-management/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -140,20 +141,28 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 		return fmt.Errorf("unmarshal config: %w", err)
 	}
 
+	var standalonePatches []string
 	for _, patch := range node.Spec.Patches {
 		var p map[string]interface{}
 		if err := yaml.Unmarshal([]byte(patch), &p); err != nil {
 			return fmt.Errorf("unmarshal patch: %w", err)
 		}
-		if _, ok := p["machine"]; !ok {
-			return fmt.Errorf("invalid patch: missing 'machine' key")
+		if _, ok := p["machine"]; ok {
+			baseConfig = mergePatches(baseConfig, p)
+		} else {
+			standalonePatches = append(standalonePatches, strings.TrimSpace(patch))
 		}
-		baseConfig = mergePatches(baseConfig, p)
 	}
 
 	configBytes, err := yaml.Marshal(baseConfig)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
+	}
+
+	for _, doc := range standalonePatches {
+		configBytes = append(configBytes, "\n---\n"...)
+		configBytes = append(configBytes, doc...)
+		configBytes = append(configBytes, '\n')
 	}
 
 	var conn TalosConnection
@@ -175,6 +184,10 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 		return fmt.Errorf("apply config: %w", err)
 	}
 
+	if err := r.saveNodeConfig(ctx, node, configBytes); err != nil {
+		return fmt.Errorf("save node config: %w", err)
+	}
+
 	node.Status.Phase = v1alpha1.TalosNodePhaseReady
 	node.Status.Message = "Configuration applied"
 	talos.SetCondition(&node.Status.Conditions, metav1.Condition{
@@ -186,6 +199,29 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 	now := metav1.Now()
 	node.Status.LastUpdateTime = &now
 	return r.Status().Update(ctx, node)
+}
+
+// saveNodeConfig persists the final merged machine config (base + patches) to a secret so it
+// can be inspected for debugging and used for drift detection in the future.
+func (r *TalosNodeReconciler) saveNodeConfig(ctx context.Context, node *v1alpha1.TalosNode, configBytes []byte) error {
+	secret := &corev1.Secret{}
+	err := r.Get(ctx, types.NamespacedName{Name: node.Name + "-config", Namespace: node.Namespace}, secret)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			return err
+		}
+		secret = &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      node.Name + "-config",
+				Namespace: node.Namespace,
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{"config.yaml": configBytes},
+		}
+		return r.Create(ctx, secret)
+	}
+	secret.Data = map[string][]byte{"config.yaml": configBytes}
+	return r.Update(ctx, secret)
 }
 
 // mergePatches deep-merges patch into base, with patch values taking precedence.

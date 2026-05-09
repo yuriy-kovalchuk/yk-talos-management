@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -546,6 +547,64 @@ func TestTalosNodeReconciler_FirstApply(t *testing.T) {
 	}
 	if !containsStr(got.Finalizers, cleanupFinalizer) {
 		t.Error("expected finalizer to be added")
+	}
+
+	var configSecret corev1.Secret
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "mynode-config", Namespace: "default"}, &configSecret); err != nil {
+		t.Fatalf("expected mynode-config secret to exist: %v", err)
+	}
+	if len(configSecret.Data["config.yaml"]) == 0 {
+		t.Error("expected config.yaml in mynode-config secret to be non-empty")
+	}
+}
+
+// Standalone document patches (e.g. RegistryMirrorConfig) must be appended to the config as
+// separate YAML documents rather than merged into the base machine config.
+func TestTalosNodeReconciler_StandaloneDocumentPatch(t *testing.T) {
+	s := newTestScheme(t)
+	var capturedConfig []byte
+	conn := &fakeConnection{
+		applyConfigFn: func(_ context.Context, _ string, cfg []byte) error {
+			capturedConfig = cfg
+			return nil
+		},
+	}
+	dialer := &fakeDialer{conn: conn}
+
+	node := &v1alpha1.TalosNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "mynode", Namespace: "default", Generation: 1},
+		Spec: v1alpha1.TalosNodeSpec{
+			ClusterRef: "mycluster",
+			NodeIP:     "10.0.0.2",
+			Role:       v1alpha1.TalosNodeRoleControlPlane,
+			Patches: []string{
+				"apiVersion: v1alpha1\nkind: RegistryMirrorConfig\nregistryName: docker.io\nendpoints:\n  - https://mirror.example.com/v2/dockerhub\noverridePath: true\n",
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(testCluster(), cpConfigSecret(), node).
+		WithStatusSubresource(node).
+		Build()
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: dialer}
+
+	_, err := r.Reconcile(context.Background(), rreq("mynode", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if capturedConfig == nil {
+		t.Fatal("expected ApplyConfig to be called with config bytes")
+	}
+	config := string(capturedConfig)
+	if !strings.Contains(config, "---") {
+		t.Error("expected multi-document separator '---' in config")
+	}
+	if !strings.Contains(config, "RegistryMirrorConfig") {
+		t.Error("expected RegistryMirrorConfig document in config")
+	}
+	if !strings.Contains(config, "mirror.example.com") {
+		t.Error("expected mirror endpoint in config")
 	}
 }
 
