@@ -1,3 +1,6 @@
+# Local tool cache and build output
+bin/
+
 # Binaries for programs and plugins
 *.exe
 *.exe~
