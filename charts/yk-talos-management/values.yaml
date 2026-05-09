@@ -41,7 +41,7 @@ leaderElection:
 
 # Webhooks require TLS. Disable when running locally or without cert-manager.
 webhooks:
-  enabled: true
+  enabled: false
   # cert-manager Certificate resource for webhook TLS.
   # Set certManager.enabled=true to have the chart create it automatically.
   certManager:
