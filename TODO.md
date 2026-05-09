@@ -23,11 +23,7 @@ The operator is functional end-to-end:
 - [ ] Integration tests — full controller lifecycle against envtest
 
 ### Should Have
-- [ ] `CHANGELOG.md`
-- [ ] API reference documentation (`docs/api-reference.md`)
-- [ ] Architecture overview (`docs/architecture.md`)
 - [ ] Dependabot for dependency updates
-- [ ] Security scanning in CI (Trivy, CodeQL)
 
 ### Nice to Have
 
@@ -49,7 +45,6 @@ The operator is functional end-to-end:
 
 ### Cluster Lifecycle
 
-- [ ] **Config drift detection** — detect when a node's running config diverges from desired state and re-apply
 - [ ] **Kubernetes upgrade** — bump the Kubernetes version cluster-wide by changing a field on `TalosCluster`
 - [ ] **Import existing cluster** — adopt a cluster not provisioned by the operator by providing an existing talosconfig and secrets bundle
 - [ ] **Etcd backups** — new `TalosEtcdBackup` and `TalosEtcdBackupSchedule` CRDs for on-demand and cron-scheduled snapshots to S3-compatible storage
