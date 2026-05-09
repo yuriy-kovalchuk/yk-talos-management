@@ -2,6 +2,7 @@
         kind-up kind-down kind-deploy \
         controller-gen \
         docker-build docker-push buildx-setup \
+        install-hooks \
         help
 
 # ── Variables ─────────────────────────────────────────────────────────────────
@@ -52,6 +53,11 @@ tidy:
 ## test: run all tests
 test:
 	go test -race -timeout 120s ./...
+
+## install-hooks: configure git to use the tracked hooks in .githooks/
+install-hooks:
+	git config core.hooksPath .githooks
+	@echo "Git hooks installed — tests will run before every push."
 
 ## test-cover: run tests with coverage report
 test-cover:

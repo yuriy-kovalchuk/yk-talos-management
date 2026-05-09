@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+
+echo "Running tests before push..."
+go test -race -timeout 120s ./...
