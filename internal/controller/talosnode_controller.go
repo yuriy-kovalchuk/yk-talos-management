@@ -337,10 +337,13 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 		if err := yaml.Unmarshal([]byte(patch), &p); err != nil {
 			return fmt.Errorf("unmarshal patch: %w", err)
 		}
-		if _, ok := p["machine"]; ok {
-			baseConfig = mergePatches(baseConfig, p)
-		} else {
+		// Talos extension documents (RegistryMirrorConfig, KubeletConfig, …) carry
+		// an apiVersion field. Everything else is a machine/cluster config patch and
+		// should be deep-merged into the base config.
+		if _, isExtension := p["apiVersion"]; isExtension {
 			standalonePatches = append(standalonePatches, strings.TrimSpace(patch))
+		} else {
+			baseConfig = mergePatches(baseConfig, p)
 		}
 	}
 
