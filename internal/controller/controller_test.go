@@ -580,6 +580,46 @@ func TestTalosNodeReconciler_FirstApply(t *testing.T) {
 	}
 }
 
+// Patches targeting the cluster: section must be deep-merged into the base config,
+// not appended as a standalone document.
+func TestTalosNodeReconciler_ClusterSectionPatch(t *testing.T) {
+	s := newTestScheme(t)
+	var capturedConfig []byte
+	conn := &fakeConnection{
+		applyConfigFn: func(_ context.Context, _ string, cfg []byte) error {
+			capturedConfig = cfg
+			return nil
+		},
+	}
+	dialer := &fakeDialer{conn: conn}
+
+	node := &v1alpha1.TalosNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "mynode", Namespace: "default", Generation: 1},
+		Spec: v1alpha1.TalosNodeSpec{
+			ClusterRef: "mycluster",
+			NodeIP:     "10.0.0.2",
+			Role:       v1alpha1.TalosNodeRoleControlPlane,
+			Patches:    []string{"cluster:\n  allowSchedulingOnControlPlanes: true\n"},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(testCluster(), cpConfigSecret(), node).
+		WithStatusSubresource(node).
+		Build()
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: dialer}
+
+	if _, err := r.Reconcile(context.Background(), rreq("mynode", "default")); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	config := string(capturedConfig)
+	if strings.Contains(config, "---") {
+		t.Error("cluster patch must be merged, not appended as standalone document")
+	}
+	if !strings.Contains(config, "allowSchedulingOnControlPlanes") {
+		t.Error("expected cluster patch to be present in merged config")
+	}
+}
+
 // Standalone document patches (e.g. RegistryMirrorConfig) must be appended to the config as
 // separate YAML documents rather than merged into the base machine config.
 func TestTalosNodeReconciler_StandaloneDocumentPatch(t *testing.T) {
