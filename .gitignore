@@ -37,3 +37,6 @@ config/rbac/
 # OS specific files
 .DS_Store
 Thumbs.db
+
+# Local testing
+local/

@@ -116,12 +116,6 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 
 	node.Status.ObservedGeneration = node.Generation
 	node.Status.Phase = v1alpha1.TalosNodePhaseApplying
-	talos.SetCondition(&node.Status.Conditions, metav1.Condition{
-		Type:    v1alpha1.TalosNodeConditionConfigApplied,
-		Status:  metav1.ConditionFalse,
-		Reason:  "Applying",
-		Message: "Applying configuration",
-	})
 	if err := r.Status().Update(ctx, node); err != nil {
 		return fmt.Errorf("update status: %w", err)
 	}

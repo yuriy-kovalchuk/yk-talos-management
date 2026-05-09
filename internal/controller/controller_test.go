@@ -549,6 +549,57 @@ func TestTalosNodeReconciler_FirstApply(t *testing.T) {
 	}
 }
 
+// After a successful first apply, a failed re-apply must not fall back to DialInsecure on retry.
+// Regression test for: ConfigApplied being cleared to False at the start of applyConfig caused
+// retries after a failed re-apply to use DialInsecure, which the node rejects with
+// "tls: certificate required" because it now requires mTLS.
+func TestTalosNodeReconciler_RetryAfterFailedReApply_UsesAuthenticatedDial(t *testing.T) {
+	s := newTestScheme(t)
+	conn := &fakeConnection{applyErr: errors.New("connection refused")}
+	dialer := &fakeDialer{conn: conn}
+
+	// Node is in Ready state — first apply already succeeded.
+	// Generation bumped (spec changed) so a re-apply is triggered.
+	node := &v1alpha1.TalosNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "mynode",
+			Namespace:  "default",
+			Generation: 2,
+			Finalizers: []string{cleanupFinalizer},
+		},
+		Spec: v1alpha1.TalosNodeSpec{
+			ClusterRef: "mycluster",
+			NodeIP:     "10.0.0.2",
+			Role:       v1alpha1.TalosNodeRoleControlPlane,
+		},
+		Status: v1alpha1.TalosNodeStatus{
+			Phase: v1alpha1.TalosNodePhaseReady,
+			CommonStatus: v1alpha1.CommonStatus{
+				ObservedGeneration: 1,
+				Conditions:         []metav1.Condition{{Type: "ConfigApplied", Status: metav1.ConditionTrue}},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(testCluster(), cpConfigSecret(), talosconfigSecret(), node).
+		WithStatusSubresource(node).
+		Build()
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: dialer}
+
+	_, err := r.Reconcile(context.Background(), rreq("mynode", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	// Must use authenticated Dial, not DialInsecure — the node is already configured.
+	if dialer.insecureCalled {
+		t.Error("DialInsecure must not be called when node was previously configured")
+	}
+	if !dialer.dialCalled {
+		t.Error("Dial must be called on retry after failed re-apply")
+	}
+}
+
 func TestTalosNodeReconciler_ReApply(t *testing.T) {
 	s := newTestScheme(t)
 	conn := &fakeConnection{}
