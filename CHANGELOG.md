@@ -11,15 +11,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version
 - `spec.patchesFrom` on `TalosNode`: reference Kubernetes Secrets as patch sources, applied after inline `spec.patches`; supports both merge and standalone document patches
 - Config drift detection for `TalosNode`: periodic comparison of running vs desired machine config via Talos API; opt-out per node via `spec.driftDetection=false` (default: `true`); offline nodes skipped silently
 - Graceful etcd leave on `ControlPlane` node deletion: 3 attempts at 90s intervals, escalating to force-remove via a surviving peer
-- Pre-push git hook running the full test suite
+- Pre-push git hook running the full test suite and manifest drift check
 - `make deps-check` to list outdated direct dependencies
 - `make api-docs` to generate `docs/api-reference.md` from CRD type annotations
 - Architecture overview (`docs/architecture.md`)
 - API reference (`docs/api-reference.md`)
 - Commit message guide (`docs/commits.md`)
+- Kustomize install path (`kubectl apply -k config/default/`): CRD bases, RBAC, Deployment, and metrics Service; names aligned with Helm chart
+- Dependabot configured for Go modules, Docker base image, and GitHub Actions (weekly, grouped PRs)
+- CI job verifying generated CRD/RBAC manifests match controller-gen output on every PR
 
 ### Fixed
 - `cluster:`-level patches now correctly deep-merged into base machine config instead of being appended as standalone YAML documents
+- Helm chart CRDs synced with latest controller-gen output; `spec.patchesFrom` and `spec.driftDetection` fields and all field descriptions were missing from the published schema
+- Helm chart `ClusterRole` was missing `create` and `delete` verbs on `talosclusters`
 
 ### Changed
 - Multi-endpoint bootstrap: kubeconfig retrieval now tries all control plane endpoints in order
@@ -27,7 +32,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version
 - Reduced cyclomatic complexity across reconcilers
 - Added field doc comments to all CRD types for accurate API reference generation
 - `bin/` added to `.gitignore`
-- Trivy security scanning: filesystem scan on every CI run (`CRITICAL,HIGH`), image scan on every CD release; results uploaded to GitHub Security tab
+- Trivy security scanning: filesystem scan on every CI run, image scan on CI docker job and every CD release; results uploaded to GitHub Security tab
+- `make manifests` now syncs generated CRDs into Helm chart templates automatically
 
 ---
 
