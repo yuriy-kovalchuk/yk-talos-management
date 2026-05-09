@@ -97,6 +97,19 @@ func TalosNodeHandler() *Handler {
 			errs = append(errs, field.NotSupported(field.NewPath("spec", "role"), obj.Spec.Role,
 				[]string{string(v1alpha1.TalosNodeRoleControlPlane), string(v1alpha1.TalosNodeRoleWorker)}))
 		}
+		if len(obj.Spec.Patches) > 0 && len(obj.Spec.PatchesFrom) > 0 {
+			errs = append(errs, field.Invalid(field.NewPath("spec", "patchesFrom"), obj.Spec.PatchesFrom,
+				"patches and patchesFrom are mutually exclusive"))
+		}
+		for i, ref := range obj.Spec.PatchesFrom {
+			p := field.NewPath("spec", "patchesFrom").Index(i)
+			if ref.Name == "" {
+				errs = append(errs, field.Required(p.Child("name"), ""))
+			}
+			if ref.Key == "" {
+				errs = append(errs, field.Required(p.Child("key"), ""))
+			}
+		}
 		return errs
 	}}
 }

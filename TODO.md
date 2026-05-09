@@ -41,7 +41,6 @@ The operator is functional end-to-end:
 - [ ] **Upgrade** — trigger in-place Talos version upgrade on a node
 - [ ] **Remove** — drain and remove a node from the cluster
 - [ ] **Reset** — wipe and reset a node to maintenance mode
-- [ ] **Secret patches** — add `spec.patchesFrom` to `TalosNode` referencing Kubernetes Secrets as patch sources; applied after inline `spec.patches` so sensitive values (credentials, keys) don't need to be inlined in the manifest
 
 ### Cluster Lifecycle
 

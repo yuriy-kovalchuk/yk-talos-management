@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -139,6 +140,24 @@ func TestTalosNodeHandler(t *testing.T) {
 				t.Errorf("validate() allow = %v, want %v, errors: %v", gotAllow, tt.wantAllow, resp)
 			}
 		})
+	}
+}
+
+func TestTalosNodeHandler_PatchesMutuallyExclusive(t *testing.T) {
+	obj := v1alpha1.TalosNode{
+		Spec: v1alpha1.TalosNodeSpec{
+			ClusterRef: "my-cluster",
+			NodeIP:     "10.0.0.1",
+			Role:       v1alpha1.TalosNodeRoleControlPlane,
+			Patches:    []string{"machine:\n  hostname: x\n"},
+			PatchesFrom: []corev1.SecretKeySelector{
+				{LocalObjectReference: corev1.LocalObjectReference{Name: "s"}, Key: "k"},
+			},
+		},
+	}
+	raw, _ := json.Marshal(obj)
+	if errs := TalosNodeHandler().validate(raw); len(errs) == 0 {
+		t.Error("expected validation error when both patches and patchesFrom are set")
 	}
 }
 

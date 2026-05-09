@@ -8,6 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version
 ## [Unreleased]
 
 ### Added
+- `spec.patchesFrom` on `TalosNode`: reference Kubernetes Secrets as patch sources, applied after inline `spec.patches`; supports both merge and standalone document patches
 - Config drift detection for `TalosNode`: periodic comparison of running vs desired machine config via Talos API; opt-out per node via `spec.driftDetection=false` (default: `true`); offline nodes skipped silently
 - Graceful etcd leave on `ControlPlane` node deletion: 3 attempts at 90s intervals, escalating to force-remove via a surviving peer
 - Pre-push git hook running the full test suite

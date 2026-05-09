@@ -347,6 +347,26 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 		}
 	}
 
+	for _, ref := range node.Spec.PatchesFrom {
+		secret, err := getSecret(ctx, r.Client, ref.Name, node.Namespace)
+		if err != nil {
+			return fmt.Errorf("get patch secret %q: %w", ref.Name, err)
+		}
+		raw, ok := secret.Data[ref.Key]
+		if !ok {
+			return fmt.Errorf("patch secret %q has no key %q", ref.Name, ref.Key)
+		}
+		var p map[string]interface{}
+		if err := yaml.Unmarshal(raw, &p); err != nil {
+			return fmt.Errorf("unmarshal patch from secret %q key %q: %w", ref.Name, ref.Key, err)
+		}
+		if _, isExtension := p["apiVersion"]; isExtension {
+			standalonePatches = append(standalonePatches, strings.TrimSpace(string(raw)))
+		} else {
+			baseConfig = mergePatches(baseConfig, p)
+		}
+	}
+
 	configBytes, err := yaml.Marshal(baseConfig)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)

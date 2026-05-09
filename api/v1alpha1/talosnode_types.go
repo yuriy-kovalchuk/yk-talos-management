@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -43,6 +44,11 @@ type TalosNodeSpec struct {
 	// Patches without an apiVersion key are deep-merged into the machine/cluster config.
 	// Patches with apiVersion (e.g. RegistryMirrorConfig) are appended as separate YAML documents.
 	Patches []string `json:"patches,omitempty"`
+
+	// Secret-backed patches applied after inline patches, so sensitive values
+	// (credentials, keys) do not need to be inlined in the manifest.
+	// Each entry references a key within a Kubernetes Secret in the same namespace.
+	PatchesFrom []corev1.SecretKeySelector `json:"patchesFrom,omitempty"`
 
 	// +kubebuilder:default=true
 	// When true, the controller periodically fetches the running config from the node

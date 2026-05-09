@@ -670,6 +670,80 @@ func TestTalosNodeReconciler_StandaloneDocumentPatch(t *testing.T) {
 	}
 }
 
+// Secret-backed patches must be loaded from the referenced secret and applied after inline patches.
+func TestTalosNodeReconciler_SecretPatch(t *testing.T) {
+	s := newTestScheme(t)
+	var capturedConfig []byte
+	conn := &fakeConnection{
+		applyConfigFn: func(_ context.Context, _ string, cfg []byte) error {
+			capturedConfig = cfg
+			return nil
+		},
+	}
+
+	patchSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-patch-secret", Namespace: "default"},
+		Data:       map[string][]byte{"patch.yaml": []byte("machine:\n  hostname: secret-hostname\n")},
+	}
+	node := &v1alpha1.TalosNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "mynode", Namespace: "default", Generation: 1},
+		Spec: v1alpha1.TalosNodeSpec{
+			ClusterRef: "mycluster",
+			NodeIP:     "10.0.0.2",
+			Role:       v1alpha1.TalosNodeRoleControlPlane,
+			PatchesFrom: []corev1.SecretKeySelector{
+				{LocalObjectReference: corev1.LocalObjectReference{Name: "my-patch-secret"}, Key: "patch.yaml"},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(testCluster(), cpConfigSecret(), patchSecret, node).
+		WithStatusSubresource(node).
+		Build()
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: &fakeDialer{conn: conn}}
+
+	if _, err := r.Reconcile(context.Background(), rreq("mynode", "default")); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if !strings.Contains(string(capturedConfig), "secret-hostname") {
+		t.Error("expected secret patch to be applied in final config")
+	}
+}
+
+// A missing key in a referenced patch secret must surface as an error.
+func TestTalosNodeReconciler_SecretPatch_MissingKey(t *testing.T) {
+	s := newTestScheme(t)
+	patchSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-patch-secret", Namespace: "default"},
+		Data:       map[string][]byte{"other.yaml": []byte("machine:\n  hostname: x\n")},
+	}
+	node := &v1alpha1.TalosNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "mynode", Namespace: "default", Generation: 1},
+		Spec: v1alpha1.TalosNodeSpec{
+			ClusterRef: "mycluster",
+			NodeIP:     "10.0.0.2",
+			Role:       v1alpha1.TalosNodeRoleControlPlane,
+			PatchesFrom: []corev1.SecretKeySelector{
+				{LocalObjectReference: corev1.LocalObjectReference{Name: "my-patch-secret"}, Key: "patch.yaml"},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(testCluster(), cpConfigSecret(), patchSecret, node).
+		WithStatusSubresource(node).
+		Build()
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: &fakeDialer{conn: &fakeConnection{}}}
+
+	if _, err := r.Reconcile(context.Background(), rreq("mynode", "default")); err != nil {
+		t.Fatalf("Reconcile() unexpected hard error: %v", err)
+	}
+	var updated v1alpha1.TalosNode
+	_ = c.Get(context.Background(), types.NamespacedName{Name: "mynode", Namespace: "default"}, &updated)
+	if updated.Status.Phase != v1alpha1.TalosNodePhaseError {
+		t.Errorf("expected Error phase on missing key, got %q", updated.Status.Phase)
+	}
+}
+
 // After a successful first apply, a failed re-apply must not fall back to DialInsecure on retry.
 // Regression test for: ConfigApplied being cleared to False at the start of applyConfig caused
 // retries after a failed re-apply to use DialInsecure, which the node rejects with
