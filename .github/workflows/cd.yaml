@@ -6,8 +6,9 @@ on:
       - "v*"
 
 permissions:
-  contents: write    # create GitHub Releases and upload assets
-  packages: write    # push images and charts to GHCR
+  contents: write          # create GitHub Releases and upload assets
+  packages: write          # push images and charts to GHCR
+  security-events: write   # upload Trivy SARIF results
 
 env:
   REGISTRY:   ghcr.io
@@ -69,6 +70,34 @@ jobs:
             BUILD_DATE=${{ needs.version.outputs.date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ── Security: Trivy image scan ────────────────────────────────────────────
+  scan-image:
+    name: Trivy image scan
+    needs: [version, build-image]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Trivy image scanner
+        uses: aquasecurity/trivy-action@0.31.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE }}:${{ needs.version.outputs.version }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+
+      - name: Upload results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
 
   # ── Package Helm chart and create GitHub Release ───────────────────────────
   release:
