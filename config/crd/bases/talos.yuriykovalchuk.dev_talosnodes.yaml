@@ -1,25 +1,24 @@
-{{- if .Values.crds.install }}
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: talosclusterbootstraps.talos.yuriykovalchuk.dev
+  name: talosnodes.talos.yuriykovalchuk.dev
 spec:
   group: talos.yuriykovalchuk.dev
   names:
-    kind: TalosClusterBootstrap
-    listKind: TalosClusterBootstrapList
-    plural: talosclusterbootstraps
+    kind: TalosNode
+    listKind: TalosNodeList
+    plural: talosnodes
     shortNames:
-    - talosclusterbootstrap
-    singular: talosclusterbootstrap
+    - talosnode
+    singular: talosnode
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.clusterRef
-      name: Cluster
+    - jsonPath: .spec.role
+      name: Role
       type: string
     - jsonPath: .status.phase
       name: Phase
@@ -27,8 +26,8 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: TalosClusterBootstrap bootstraps etcd on the first control plane
-          node and stores the kubeconfig.
+        description: TalosNode applies machine configuration to a single Talos Linux
+          node and manages its lifecycle.
         properties:
           apiVersion:
             description: |-
@@ -50,10 +49,66 @@ spec:
           spec:
             properties:
               clusterRef:
-                description: Name of the TalosCluster this bootstrap belongs to.
+                description: Name of the TalosCluster this node belongs to.
+                type: string
+              driftDetection:
+                default: true
+                description: |-
+                  When true, the controller periodically fetches the running config from the node
+                  and re-applies if it diverges from the desired state. Set to false for nodes
+                  that are frequently offline (e.g. homelab nodes powered down overnight).
+                type: boolean
+              nodeIP:
+                description: IPv4 address of the Talos node.
+                format: ipv4
+                type: string
+              patches:
+                description: |-
+                  YAML patches applied on top of the base machine config.
+                  Patches without an apiVersion key are deep-merged into the machine/cluster config.
+                  Patches with apiVersion (e.g. RegistryMirrorConfig) are appended as separate YAML documents.
+                items:
+                  type: string
+                type: array
+              patchesFrom:
+                description: |-
+                  Secret-backed patches applied after inline patches, so sensitive values
+                  (credentials, keys) do not need to be inlined in the manifest.
+                  Each entry references a key within a Kubernetes Secret in the same namespace.
+                items:
+                  description: SecretKeySelector selects a key of a Secret.
+                  properties:
+                    key:
+                      description: The key of the secret to select from.  Must be
+                        a valid secret key.
+                      type: string
+                    name:
+                      default: ""
+                      description: |-
+                        Name of the referent.
+                        This field is effectively required, but due to backwards compatibility is
+                        allowed to be empty. Instances of this type with an empty value here are
+                        almost certainly wrong.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                      type: string
+                    optional:
+                      description: Specify whether the Secret or its key must be defined
+                      type: boolean
+                  required:
+                  - key
+                  type: object
+                  x-kubernetes-map-type: atomic
+                type: array
+              role:
+                description: Role of this node in the cluster.
+                enum:
+                - ControlPlane
+                - Worker
                 type: string
             required:
             - clusterRef
+            - nodeIP
+            - role
             type: object
           status:
             properties:
@@ -114,6 +169,10 @@ spec:
                   - type
                   type: object
                 type: array
+              deletionAttempts:
+                description: Number of failed etcd leave attempts during deletion.
+                format: int32
+                type: integer
               lastUpdateTime:
                 description: Timestamp of the last successful reconcile.
                 format: date-time
@@ -126,7 +185,7 @@ spec:
                 format: int64
                 type: integer
               phase:
-                description: Current lifecycle phase of the bootstrap process.
+                description: Current lifecycle phase of the node.
                 type: string
               retryCount:
                 description: Number of consecutive failed reconcile attempts.
@@ -139,4 +198,3 @@ spec:
     storage: true
     subresources:
       status: {}
-{{- end }}

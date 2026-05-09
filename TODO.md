@@ -18,12 +18,8 @@ The operator is functional end-to-end:
 
 - [ ] Add `CONTRIBUTING.md` — contribution guidelines
 - [ ] Add `SECURITY.md` — vulnerability reporting policy
-- [ ] Add deployment manifests (`config/manager/`, `config/rbac/`, `config/crd/`) via kustomize
 - [ ] Webhook TLS — generate certs, create secret, mount in deployment, add CA bundle to webhook config
 - [ ] Integration tests — full controller lifecycle against envtest
-
-### Should Have
-- [ ] Dependabot for dependency updates
 
 ### Nice to Have
 

@@ -20,6 +20,8 @@ import (
 // +kubebuilder:rbac:groups=talos.yuriykovalchuk.dev,resources=talosclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=talos.yuriykovalchuk.dev,resources=talosclusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=create;get;list;update;watch
 
 type TalosClusterReconciler struct {
 	client.Client

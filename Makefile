@@ -97,9 +97,15 @@ manifests: controller-gen
 	$(CONTROLLER_GEN) crd:crdVersions=v1 \
 	    paths="./api/..." \
 	    output:crd:artifacts:config=$(CRD_DIR)
-	$(CONTROLLER_GEN) rbac:roleName=manager \
+	$(CONTROLLER_GEN) rbac:roleName=yk-talos-management-manager \
 	    paths="./internal/controller/..." \
 	    output:rbac:artifacts:config=$(RBAC_DIR)
+	@echo "Syncing CRDs to Helm chart..."
+	@for crd in $(CRD_DIR)/*.yaml; do \
+	    name=$$(basename $$crd); \
+	    dst=charts/yk-talos-management/templates/crds/$$name; \
+	    { printf '{{- if .Values.crds.install }}\n'; cat $$crd; printf '{{- end }}\n'; } > $$dst; \
+	done
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -158,10 +164,9 @@ kind-up:
 kind-down:
 	kind delete cluster --name $(KIND_CLUSTER)
 
-## kind-deploy: apply CRDs and RBAC to the current cluster
+## kind-deploy: apply CRDs, RBAC, and manager deployment to the current cluster
 kind-deploy: manifests
-	kubectl apply -f $(CRD_DIR)/
-	kubectl apply -f $(RBAC_DIR)/
+	kubectl apply -k config/default/
 
 # ── Help ──────────────────────────────────────────────────────────────────────
 

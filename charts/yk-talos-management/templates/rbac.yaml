@@ -16,7 +16,7 @@ rules:
     verbs: [get, patch, update]
   - apiGroups: [talos.yuriykovalchuk.dev]
     resources: [talosclusters]
-    verbs: [get, list, patch, update, watch]
+    verbs: [create, delete, get, list, patch, update, watch]
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]

@@ -27,10 +27,6 @@ go.work.sum
 # Env files
 .env
 
-# Generated Kubernetes manifests
-config/crd/
-config/rbac/
-
 # IDEs and Editors
 .idea/
 .vscode/

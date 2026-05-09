@@ -3,3 +3,10 @@ set -e
 
 echo "Running tests before push..."
 go test -race -timeout 120s ./...
+
+echo "Checking generated manifests are up-to-date..."
+make manifests
+git diff --exit-code config/crd/bases/ config/rbac/role.yaml charts/yk-talos-management/templates/crds/ || {
+  echo "CRD/RBAC manifests are out of date. Commit the result of 'make manifests'."
+  exit 1
+}

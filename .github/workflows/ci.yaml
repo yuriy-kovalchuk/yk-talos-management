@@ -42,6 +42,29 @@ jobs:
           files: coverage.txt
         continue-on-error: true
 
+  # ── Generated manifests are up-to-date ────────────────────────────────────
+  manifests:
+    name: Manifests up-to-date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Regenerate manifests
+        run: make manifests
+
+      - name: Check for diff
+        run: |
+          git diff --exit-code config/crd/bases/ config/rbac/role.yaml charts/yk-talos-management/templates/crds/ || {
+            echo "CRD/RBAC manifests are out of date. Run 'make manifests' and commit the result."
+            exit 1
+          }
+
   # ── Go: build binary ───────────────────────────────────────────────────────
   build:
     name: Build binary

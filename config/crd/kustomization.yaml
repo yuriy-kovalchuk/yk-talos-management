@@ -1,0 +1,4 @@
+resources:
+  - bases/talos.yuriykovalchuk.dev_talosclusters.yaml
+  - bases/talos.yuriykovalchuk.dev_talosnodes.yaml
+  - bases/talos.yuriykovalchuk.dev_talosclusterbootstraps.yaml
