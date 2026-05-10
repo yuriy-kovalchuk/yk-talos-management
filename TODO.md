@@ -9,6 +9,7 @@ The operator is functional end-to-end:
 - **TalosClusterBootstrap** — waits for a ready control plane node, bootstraps etcd, retrieves and stores kubeconfig; falls back to any available control plane endpoint for kubeconfig retrieval (all endpoints embedded in generated talosconfig)
 - Finalizers and cleanup on all three CRDs
 - Structured logging, retry backoff, generation-based idempotency
+- Prometheus metrics and Grafana dashboard (node phase, config size, drift, etcd, API latency)
 
 ---
 
@@ -25,7 +26,6 @@ The operator is functional end-to-end:
 - [ ] E2E tests against a real or simulated Talos cluster
 - [ ] `CODE_OF_CONDUCT.md`
 - [ ] `MAINTAINERS.md`
-- [ ] Prometheus metrics / Grafana dashboard examples
 
 ---
 
@@ -34,7 +34,7 @@ The operator is functional end-to-end:
 ### Node Lifecycle
 
 - [ ] **Upgrade** — trigger in-place Talos version upgrade on a node
-- [ ] **Remove** — drain and remove a node from the cluster
+- [ ] **Remove** — drain Kubernetes node and delete Node object after etcd removal (etcd leave already implemented; Kubernetes node object must be deleted manually)
 - [ ] **Reset** — wipe and reset a node to maintenance mode
 
 ### Cluster Lifecycle
