@@ -9,6 +9,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version
 
 ---
 
+## [0.4.0-alpha] - 2026-05-10
+
+### Added
+- Prometheus metrics: node phase, config apply, drift check, config size, etcd leave, API latency, secret operations, bootstrap duration
+- Grafana dashboard: node status table, machine config sizes bar gauge, reconcile activity and API latency panels
+- Grafana dashboard ConfigMap in Helm chart (`metrics.grafanaDashboard.enabled`)
+- ServiceMonitor in `config/monitoring/` for Prometheus Operator discovery
+- `make monitoring-up / monitoring-down` targets for local kind setup
+- `hack/kubectl-admin.yaml` for remote cluster access via the bootstrap-generated kubeconfig
+- `talos-up` / `talos-down` now manage one node at a time (`TALOS_NODE_NAME`); container names no longer carry a cluster prefix
+
+### Fixed
+- `talos_node_config_size_bytes` gauge re-emitted on every reconcile from the persisted `{node}-config` Secret so it survives operator pod restarts
+
+---
+
 ## [0.3.1-alpha] - 2026-05-10
 
 ### Added
