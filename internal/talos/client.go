@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cosi-project/runtime/pkg/resource"
+	appmetrics "github.com/yuriy-kovalchuk/yk-talos-management/internal/metrics"
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	machineconfig "github.com/siderolabs/talos/pkg/machinery/config"
@@ -162,19 +163,26 @@ func NewClientInsecure(ctx context.Context, endpoint string) (*Client, error) {
 }
 
 // ApplyConfig applies a machine config to a node and logs the mode and any warnings from the response.
-func ApplyConfig(ctx context.Context, c *Client, nodeIP string, configBytes []byte) error {
+func ApplyConfig(ctx context.Context, c *Client, nodeIP string, configBytes []byte, cluster string) error {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 
+	start := time.Now()
 	l := log.FromContext(ctx)
 	resp, err := c.ApplyConfiguration(talosclient.WithNode(ctx, nodeIP), &machineapi.ApplyConfigurationRequest{
 		Data: configBytes,
 		Mode: machineapi.ApplyConfigurationRequest_AUTO,
 	})
+	result := "success"
+	if err != nil {
+		result = "error"
+	}
+	appmetrics.APICallDuration.WithLabelValues("apply_config", result).Observe(time.Since(start).Seconds())
 	if err != nil {
 		return err
 	}
 	for _, msg := range resp.GetMessages() {
+		appmetrics.ConfigApplyModeTotal.WithLabelValues(msg.GetMode().String(), cluster).Inc()
 		l.Info("Talos apply-config response",
 			"node", nodeIP,
 			"mode", msg.GetMode().String(),
@@ -191,14 +199,20 @@ func ApplyConfig(ctx context.Context, c *Client, nodeIP string, configBytes []by
 func Bootstrap(ctx context.Context, c *Client, endpoint string) error {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	return c.Bootstrap(talosclient.WithNode(ctx, endpoint), &machineapi.BootstrapRequest{})
+	start := time.Now()
+	err := c.Bootstrap(talosclient.WithNode(ctx, endpoint), &machineapi.BootstrapRequest{})
+	appmetrics.APICallDuration.WithLabelValues("bootstrap", resultLabel(err)).Observe(time.Since(start).Seconds())
+	return err
 }
 
 // GetKubeconfig retrieves the admin kubeconfig from the cluster.
 func GetKubeconfig(ctx context.Context, c *Client, endpoint string) ([]byte, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	return c.Kubeconfig(talosclient.WithNode(ctx, endpoint))
+	start := time.Now()
+	b, err := c.Kubeconfig(talosclient.WithNode(ctx, endpoint))
+	appmetrics.APICallDuration.WithLabelValues("get_kubeconfig", resultLabel(err)).Observe(time.Since(start).Seconds())
+	return b, err
 }
 
 // GetMachineConfig retrieves the active running machine config from the node via the COSI resource API.
@@ -207,10 +221,12 @@ func GetMachineConfig(ctx context.Context, c *Client, nodeIP string) ([]byte, er
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 
+	start := time.Now()
 	r, err := c.COSI.Get(
 		talosclient.WithNode(ctx, nodeIP),
 		resource.NewMetadata(resourceconfig.NamespaceName, resourceconfig.MachineConfigType, resourceconfig.ActiveID, resource.VersionUndefined),
 	)
+	appmetrics.APICallDuration.WithLabelValues("get_machine_config", resultLabel(err)).Observe(time.Since(start).Seconds())
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +244,10 @@ func GetMachineConfig(ctx context.Context, c *Client, nodeIP string) ([]byte, er
 func EtcdLeave(ctx context.Context, c *Client, nodeIP string) error {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
-	return c.EtcdLeaveCluster(talosclient.WithNode(ctx, nodeIP), &machineapi.EtcdLeaveClusterRequest{})
+	start := time.Now()
+	err := c.EtcdLeaveCluster(talosclient.WithNode(ctx, nodeIP), &machineapi.EtcdLeaveClusterRequest{})
+	appmetrics.APICallDuration.WithLabelValues("etcd_leave", resultLabel(err)).Observe(time.Since(start).Seconds())
+	return err
 }
 
 // EtcdForceRemoveByIP lists etcd members via survivorIP, finds the member whose
@@ -238,19 +257,31 @@ func EtcdForceRemoveByIP(ctx context.Context, c *Client, survivorIP, deadNodeIP 
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 
+	start := time.Now()
 	resp, err := c.EtcdMemberList(talosclient.WithNode(ctx, survivorIP), &machineapi.EtcdMemberListRequest{})
 	if err != nil {
+		appmetrics.APICallDuration.WithLabelValues("etcd_force_remove", "error").Observe(time.Since(start).Seconds())
 		return fmt.Errorf("list etcd members: %w", err)
 	}
 
 	memberID := findEtcdMemberID(resp.GetMessages(), deadNodeIP)
 	if memberID == 0 {
+		appmetrics.APICallDuration.WithLabelValues("etcd_force_remove", "error").Observe(time.Since(start).Seconds())
 		return fmt.Errorf("etcd member with IP %s not found in membership list", deadNodeIP)
 	}
 
-	return c.EtcdRemoveMemberByID(talosclient.WithNode(ctx, survivorIP), &machineapi.EtcdRemoveMemberByIDRequest{
+	err = c.EtcdRemoveMemberByID(talosclient.WithNode(ctx, survivorIP), &machineapi.EtcdRemoveMemberByIDRequest{
 		MemberId: memberID,
 	})
+	appmetrics.APICallDuration.WithLabelValues("etcd_force_remove", resultLabel(err)).Observe(time.Since(start).Seconds())
+	return err
+}
+
+func resultLabel(err error) string {
+	if err != nil {
+		return "error"
+	}
+	return "success"
 }
 
 // findEtcdMemberID scans member list messages and returns the ID of the member

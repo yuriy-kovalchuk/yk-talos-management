@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	appmetrics "github.com/yuriy-kovalchuk/yk-talos-management/internal/metrics"
 	"github.com/yuriy-kovalchuk/yk-talos-management/internal/talos"
 )
 
@@ -41,6 +42,7 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	l.V(1).Info("Reconciling TalosCluster", "name", cluster.Name, "generation", cluster.Generation)
 	start := time.Now()
 	defer func() { l.V(1).Info("reconcile done", "duration", time.Since(start)) }()
+	appmetrics.RecordClusterPhase(cluster.Name, cluster.Namespace, string(cluster.Status.Phase), string(cluster.Status.Phase))
 
 	if cluster.DeletionTimestamp != nil {
 		return r.handleDeletion(ctx, &cluster)
@@ -60,6 +62,7 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if talos.IsContextCancelled(err) {
 			return ctrl.Result{}, nil
 		}
+		appmetrics.RecordClusterPhase(cluster.Name, cluster.Namespace, string(v1alpha1.TalosPhaseProvisioning), string(v1alpha1.TalosPhaseError))
 		cluster.Status.Phase = v1alpha1.TalosPhaseError
 		emitEvent(r.Recorder, &cluster, corev1.EventTypeWarning, "ProvisionFailed", err.Error())
 		if updateErr := r.Status().Update(ctx, &cluster); updateErr != nil {
@@ -102,8 +105,10 @@ func isUpToDate(cluster *v1alpha1.TalosCluster) bool {
 }
 
 func (r *TalosClusterReconciler) provision(ctx context.Context, cluster *v1alpha1.TalosCluster) error {
+	fromPhase := cluster.Status.Phase
 	cluster.Status.ObservedGeneration = cluster.Generation
 	cluster.Status.Phase = v1alpha1.TalosPhaseProvisioning
+	appmetrics.RecordClusterPhase(cluster.Name, cluster.Namespace, string(fromPhase), string(v1alpha1.TalosPhaseProvisioning))
 	talos.SetConditionStatus(&cluster.Status.Conditions,
 		v1alpha1.TalosClusterConditionSecretsGenerated, metav1.ConditionFalse, "Generating", "Generating cluster secrets")
 	talos.SetConditionStatus(&cluster.Status.Conditions,
@@ -152,6 +157,7 @@ func (r *TalosClusterReconciler) provision(ctx context.Context, cluster *v1alpha
 	}
 
 	cluster.Status.Phase = v1alpha1.TalosPhaseReady
+	appmetrics.RecordClusterPhase(cluster.Name, cluster.Namespace, string(v1alpha1.TalosPhaseProvisioning), string(v1alpha1.TalosPhaseReady))
 	now := metav1.Now()
 	cluster.Status.LastUpdateTime = &now
 	talos.SetConditionStatus(&cluster.Status.Conditions,

@@ -80,40 +80,15 @@ kubectl delete namespace yk-talos-management-system
 
 ## Local development setup
 
-### Prerequisites
+For a full end-to-end local setup — kind cluster, ephemeral Talos nodes in Docker, optional Prometheus + Grafana — see **[docs/local-testing.md](docs/local-testing.md)**.
 
-- [Go](https://go.dev/) 1.23+
-- [kind](https://kind.sigs.k8s.io/)
-- [kubectl](https://kubernetes.io/docs/tasks/tools/)
-- [make](https://www.gnu.org/software/make/)
-
-### 1. Start a management cluster
+Quick path:
 
 ```bash
 make kind-up
-```
-
-This creates a local Kind cluster named `talos-kind-dev` using `hack/kind-config.yaml`. This is the cluster where the operator runs — not the Talos cluster being managed.
-
-### 2. Generate and apply CRDs
-
-```bash
-make manifests
-make kind-deploy
-```
-
-### 3. Run the operator locally
-
-```bash
+make kind-install-crds
+make talos-up TALOS_NODE_NAME=cp1
 make run
-```
-
-Webhooks are automatically disabled when running outside a cluster.
-
-### Tear down
-
-```bash
-make kind-down
 ```
 
 ---

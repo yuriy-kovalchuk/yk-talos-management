@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: yk-talos-management
+  namespace: yk-talos-management-system
+  labels:
+    app.kubernetes.io/name: yk-talos-management
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: yk-talos-management
+  namespaceSelector:
+    matchNames:
+      - yk-talos-management-system
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s

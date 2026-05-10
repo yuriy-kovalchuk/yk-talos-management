@@ -33,6 +33,21 @@ metrics:
   service:
     type: ClusterIP
     port: 8080
+  # ServiceMonitor for Prometheus Operator (kube-prometheus-stack).
+  serviceMonitor:
+    enabled: false
+    # Namespace to create the ServiceMonitor in. Defaults to Release.Namespace.
+    namespace: ""
+    interval: 30s
+    scrapeTimeout: 10s
+    # Extra labels added to the ServiceMonitor — useful for matching Prometheus's
+    # serviceMonitorSelector when serviceMonitorSelectorNilUsesHelmValues is true.
+    additionalLabels: {}
+  # Grafana dashboard ConfigMap (requires the Grafana sidecar with grafana_dashboard=1 discovery).
+  grafanaDashboard:
+    enabled: false
+    # Namespace to create the ConfigMap in. Defaults to Release.Namespace.
+    namespace: ""
 
 # Zap log level. 0 = info, 1 = debug (V(1)), 2+ = trace.
 logLevel: 1

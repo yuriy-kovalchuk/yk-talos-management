@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/yuriy-kovalchuk/yk-talos-management/internal/config"
+	appmetrics "github.com/yuriy-kovalchuk/yk-talos-management/internal/metrics"
 	"github.com/yuriy-kovalchuk/yk-talos-management/internal/talos"
 )
 
@@ -38,11 +39,14 @@ type TalosNodeReconciler struct {
 
 func (r *TalosNodeReconciler) setError(ctx context.Context, node *v1alpha1.TalosNode, err error) (ctrl.Result, error) {
 	l := log.FromContext(ctx)
+	fromPhase := node.Status.Phase
 	node.Status.Phase = v1alpha1.TalosNodePhaseError
 	node.Status.RetryCount++
 	node.Status.Message = err.Error()
 	delay := config.GetRetryDelay(node.Status.RetryCount)
 	l.Error(err, "apply config failed", "ip", node.Spec.NodeIP, "attempt", node.Status.RetryCount, "requeueAfter", delay)
+	appmetrics.RecordNodePhase(node.Name, node.Namespace, node.Spec.ClusterRef, string(node.Spec.Role), node.Spec.NodeIP, string(fromPhase), string(v1alpha1.TalosNodePhaseError))
+	appmetrics.ConfigApplyTotal.WithLabelValues(string(node.Spec.Role), "error", node.Spec.ClusterRef).Inc()
 	emitEvent(r.Recorder, node, corev1.EventTypeWarning, "ApplyFailed", err.Error())
 	if updateErr := r.Status().Update(ctx, node); updateErr != nil {
 		l.Error(updateErr, "update error status")
@@ -61,6 +65,8 @@ func (r *TalosNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	l.V(1).Info("Reconciling TalosNode", "name", node.Name, "ip", node.Spec.NodeIP, "generation", node.Generation)
 	start := time.Now()
 	defer func() { l.V(1).Info("reconcile done", "duration", time.Since(start)) }()
+	appmetrics.RecordNodePhase(node.Name, node.Namespace, node.Spec.ClusterRef, string(node.Spec.Role), node.Spec.NodeIP, string(node.Status.Phase), string(node.Status.Phase))
+	r.refreshConfigSizeMetric(ctx, &node)
 
 	if node.DeletionTimestamp != nil {
 		return r.handleDeletion(ctx, &node)
@@ -136,6 +142,7 @@ func (r *TalosNodeReconciler) checkDrift(ctx context.Context, node *v1alpha1.Tal
 	conn, err := r.Talos.Dial(ctx, talosconfigSecret.Data["talosconfig"], node.Spec.NodeIP)
 	if err != nil {
 		l.Info("drift check: node unreachable, will retry", "ip", node.Spec.NodeIP, "requeueAfter", driftCheckInterval)
+		appmetrics.DriftCheckTotal.WithLabelValues("unreachable", node.Spec.ClusterRef, node.Name).Inc()
 		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
 	}
 	defer conn.Close() //nolint:errcheck
@@ -143,20 +150,24 @@ func (r *TalosNodeReconciler) checkDrift(ctx context.Context, node *v1alpha1.Tal
 	remoteBytes, err := conn.GetMachineConfig(ctx, node.Spec.NodeIP)
 	if err != nil {
 		l.Error(err, "drift check: could not read remote config, will retry", "ip", node.Spec.NodeIP, "requeueAfter", driftCheckInterval)
+		appmetrics.DriftCheckTotal.WithLabelValues("error", node.Spec.ClusterRef, node.Name).Inc()
 		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
 	}
 
 	drifted, err := configsDiffer(savedSecret.Data["config.yaml"], remoteBytes)
 	if err != nil {
 		l.Error(err, "drift check: comparison failed", "ip", node.Spec.NodeIP)
+		appmetrics.DriftCheckTotal.WithLabelValues("error", node.Spec.ClusterRef, node.Name).Inc()
 		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
 	}
 
 	if !drifted {
 		l.V(1).Info("drift check: config in sync", "ip", node.Spec.NodeIP)
+		appmetrics.DriftCheckTotal.WithLabelValues("in_sync", node.Spec.ClusterRef, node.Name).Inc()
 		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
 	}
 
+	appmetrics.DriftCheckTotal.WithLabelValues("drifted", node.Spec.ClusterRef, node.Name).Inc()
 	l.Info("drift detected, re-applying config", "ip", node.Spec.NodeIP)
 	emitEvent(r.Recorder, node, corev1.EventTypeWarning, "DriftDetected", "Node config drift detected, re-applying")
 
@@ -231,12 +242,14 @@ func (r *TalosNodeReconciler) handleEtcdLeave(ctx context.Context, node *v1alpha
 		if err := r.tryEtcdLeave(ctx, node.Spec.NodeIP, talosconfig); err != nil {
 			node.Status.DeletionAttempts++
 			l.Error(err, "etcd leave failed, will retry", "ip", node.Spec.NodeIP, "attempt", node.Status.DeletionAttempts, "requeueAfter", etcdLeaveRetryDelay)
+			appmetrics.EtcdLeaveTotal.WithLabelValues("failed", node.Spec.ClusterRef).Inc()
 			if updateErr := r.Status().Update(ctx, node); updateErr != nil {
 				l.Error(updateErr, "update deletion attempts status")
 			}
 			return false, ctrl.Result{RequeueAfter: etcdLeaveRetryDelay}, nil
 		}
 		l.Info("etcd leave succeeded", "ip", node.Spec.NodeIP)
+		appmetrics.EtcdLeaveTotal.WithLabelValues("success", node.Spec.ClusterRef).Inc()
 		return true, ctrl.Result{}, nil
 	}
 
@@ -254,7 +267,10 @@ func (r *TalosNodeReconciler) handleEtcdLeave(ctx context.Context, node *v1alpha
 	}
 	defer conn.Close() //nolint:errcheck
 	if err := conn.EtcdForceRemove(ctx, survivorEP, node.Spec.NodeIP); err != nil {
-		l.Error(err, "etcd force-remove failed, proceeding with cleanup", "node", node.Name, "survivor", survivorEP)
+		l.Error(err, "etcd force-remove failed, proceeding with cleanup", "survivor", survivorEP)
+		appmetrics.EtcdLeaveTotal.WithLabelValues("force_remove_failed", node.Spec.ClusterRef).Inc()
+	} else {
+		appmetrics.EtcdLeaveTotal.WithLabelValues("force_removed", node.Spec.ClusterRef).Inc()
 	}
 	return true, ctrl.Result{}, nil
 }
@@ -308,8 +324,10 @@ func survivingPeers(endpoints []string, excludeIP string) []string {
 func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.TalosNode) error {
 	firstApply := !talos.HasCondition(node.Status.Conditions, v1alpha1.TalosNodeConditionConfigApplied, metav1.ConditionTrue)
 
+	fromPhase := node.Status.Phase
 	node.Status.ObservedGeneration = node.Generation
 	node.Status.Phase = v1alpha1.TalosNodePhaseApplying
+	appmetrics.RecordNodePhase(node.Name, node.Namespace, node.Spec.ClusterRef, string(node.Spec.Role), node.Spec.NodeIP, string(fromPhase), string(v1alpha1.TalosNodePhaseApplying))
 	if err := r.Status().Update(ctx, node); err != nil {
 		return fmt.Errorf("update status: %w", err)
 	}
@@ -396,7 +414,7 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 	}
 	defer conn.Close() //nolint:errcheck
 
-	if err := conn.ApplyConfig(ctx, node.Spec.NodeIP, configBytes); err != nil {
+	if err := conn.ApplyConfig(ctx, node.Spec.NodeIP, configBytes, cluster.Name); err != nil {
 		return fmt.Errorf("apply config: %w", err)
 	}
 
@@ -404,6 +422,8 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 		return fmt.Errorf("save node config: %w", err)
 	}
 
+	appmetrics.RecordNodePhase(node.Name, node.Namespace, node.Spec.ClusterRef, string(node.Spec.Role), node.Spec.NodeIP, string(v1alpha1.TalosNodePhaseApplying), string(v1alpha1.TalosNodePhaseReady))
+	appmetrics.ConfigApplyTotal.WithLabelValues(string(node.Spec.Role), "success", node.Spec.ClusterRef).Inc()
 	node.Status.Phase = v1alpha1.TalosNodePhaseReady
 	node.Status.Message = "Configuration applied"
 	talos.SetConditionStatus(&node.Status.Conditions,
@@ -413,9 +433,22 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 	return r.Status().Update(ctx, node)
 }
 
+// refreshConfigSizeMetric re-emits NodeConfigSizeBytes from the persisted config Secret.
+// Called on every reconcile so the gauge survives operator pod restarts.
+func (r *TalosNodeReconciler) refreshConfigSizeMetric(ctx context.Context, node *v1alpha1.TalosNode) {
+	s, err := getSecret(ctx, r.Client, nodeConfigName(node.Name), node.Namespace)
+	if err != nil {
+		return
+	}
+	if size := len(s.Data["config.yaml"]); size > 0 {
+		appmetrics.NodeConfigSizeBytes.WithLabelValues(node.Name, node.Namespace, node.Spec.ClusterRef, string(node.Spec.Role), node.Spec.NodeIP).Set(float64(size))
+	}
+}
+
 // saveNodeConfig persists the final merged machine config (base + patches) to a secret so it
 // can be inspected for debugging and used for drift detection in the future.
 func (r *TalosNodeReconciler) saveNodeConfig(ctx context.Context, node *v1alpha1.TalosNode, configBytes []byte) error {
+	appmetrics.NodeConfigSizeBytes.WithLabelValues(node.Name, node.Namespace, node.Spec.ClusterRef, string(node.Spec.Role), node.Spec.NodeIP).Set(float64(len(configBytes)))
 	name := nodeConfigName(node.Name)
 	return upsertSecret(ctx, r.Client, name, node.Namespace,
 		func() *corev1.Secret { return newSecret(name, node.Namespace, "config.yaml", configBytes) },

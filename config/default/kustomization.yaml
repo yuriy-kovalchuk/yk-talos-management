@@ -1,6 +1,7 @@
 namespace: yk-talos-management-system
 
 resources:
+  - namespace.yaml
   - ../crd
   - ../rbac
   - ../manager

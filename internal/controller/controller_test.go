@@ -70,7 +70,7 @@ func (f *fakeDialer) DialInsecure(_ context.Context, _ string) (TalosConnection,
 type fakeConnection struct {
 	applyErr              error
 	applyConfigCall       bool
-	applyConfigFn         func(context.Context, string, []byte) error
+	applyConfigFn         func(context.Context, string, []byte, string) error
 	bootstrapErr          error
 	bootstrapCall         bool
 	kubeconfig            []byte
@@ -85,10 +85,10 @@ type fakeConnection struct {
 	closed                bool
 }
 
-func (f *fakeConnection) ApplyConfig(ctx context.Context, nodeIP string, cfg []byte) error {
+func (f *fakeConnection) ApplyConfig(ctx context.Context, nodeIP string, cfg []byte, cluster string) error {
 	f.applyConfigCall = true
 	if f.applyConfigFn != nil {
-		return f.applyConfigFn(ctx, nodeIP, cfg)
+		return f.applyConfigFn(ctx, nodeIP, cfg, cluster)
 	}
 	return f.applyErr
 }
@@ -586,7 +586,7 @@ func TestTalosNodeReconciler_ClusterSectionPatch(t *testing.T) {
 	s := newTestScheme(t)
 	var capturedConfig []byte
 	conn := &fakeConnection{
-		applyConfigFn: func(_ context.Context, _ string, cfg []byte) error {
+		applyConfigFn: func(_ context.Context, _ string, cfg []byte, _ string) error {
 			capturedConfig = cfg
 			return nil
 		},
@@ -626,7 +626,7 @@ func TestTalosNodeReconciler_StandaloneDocumentPatch(t *testing.T) {
 	s := newTestScheme(t)
 	var capturedConfig []byte
 	conn := &fakeConnection{
-		applyConfigFn: func(_ context.Context, _ string, cfg []byte) error {
+		applyConfigFn: func(_ context.Context, _ string, cfg []byte, _ string) error {
 			capturedConfig = cfg
 			return nil
 		},
@@ -675,7 +675,7 @@ func TestTalosNodeReconciler_SecretPatch(t *testing.T) {
 	s := newTestScheme(t)
 	var capturedConfig []byte
 	conn := &fakeConnection{
-		applyConfigFn: func(_ context.Context, _ string, cfg []byte) error {
+		applyConfigFn: func(_ context.Context, _ string, cfg []byte, _ string) error {
 			capturedConfig = cfg
 			return nil
 		},

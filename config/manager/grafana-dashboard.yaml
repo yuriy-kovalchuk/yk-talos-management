@@ -1,0 +1,387 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: yk-talos-management-dashboard
+  namespace: yk-talos-management-system
+  labels:
+    grafana_dashboard: "1"
+    app.kubernetes.io/name: yk-talos-management
+data:
+  yk-talos-management.json: |
+    {
+      "annotations": {"list": []},
+      "editable": true,
+      "graphTooltip": 1,
+      "id": null,
+      "links": [],
+      "panels": [
+
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "thresholds"},
+              "thresholds": {"mode": "absolute", "steps": [
+                {"color": "text", "value": null},
+                {"color": "green", "value": 1}
+              ]},
+              "unit": "short",
+              "noValue": "0"
+            }
+          },
+          "gridPos": {"h": 4, "w": 8, "x": 0, "y": 0},
+          "id": 1,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+            "textMode": "value_and_name"
+          },
+          "title": "Total Nodes",
+          "type": "stat",
+          "targets": [{
+            "datasource": {"type": "prometheus", "uid": "${datasource}"},
+            "expr": "count(max by (name) (talos_node_phase{cluster=~\"$cluster\"} == 1))",
+            "instant": true,
+            "legendFormat": "nodes"
+          }]
+        },
+
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "thresholds"},
+              "thresholds": {"mode": "absolute", "steps": [
+                {"color": "green", "value": null},
+                {"color": "orange", "value": 1}
+              ]},
+              "unit": "short",
+              "noValue": "0"
+            }
+          },
+          "gridPos": {"h": 4, "w": 8, "x": 8, "y": 0},
+          "id": 2,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+            "textMode": "value_and_name"
+          },
+          "title": "Nodes with Drift Failures",
+          "type": "stat",
+          "targets": [{
+            "datasource": {"type": "prometheus", "uid": "${datasource}"},
+            "expr": "count(increase(talos_drift_check_total{result=~\"unreachable|error\", cluster=~\"$cluster\"}[10m]) > 0)",
+            "instant": true,
+            "legendFormat": "failing"
+          }]
+        },
+
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "fieldConfig": {
+            "defaults": {
+              "color": {"mode": "fixed", "fixedColor": "text"},
+              "unit": "short",
+              "noValue": "—"
+            },
+            "overrides": [
+              {"matcher": {"id": "byName", "options": "Completed"},        "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]},
+              {"matcher": {"id": "byName", "options": "Bootstrapping"},    "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "blue"}}]},
+              {"matcher": {"id": "byName", "options": "WaitingForNodes"},  "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "yellow"}}]},
+              {"matcher": {"id": "byName", "options": "WaitingForKubeconfig"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "yellow"}}]},
+              {"matcher": {"id": "byName", "options": "Error"},            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}
+            ]
+          },
+          "gridPos": {"h": 4, "w": 8, "x": 16, "y": 0},
+          "id": 3,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+            "textMode": "name"
+          },
+          "title": "Bootstrap",
+          "type": "stat",
+          "targets": [{
+            "datasource": {"type": "prometheus", "uid": "${datasource}"},
+            "expr": "talos_bootstrap_phase{cluster=~\"$cluster\"} == 1",
+            "instant": true,
+            "legendFormat": "{{phase}}"
+          }]
+        },
+
+        {
+          "collapsed": false,
+          "gridPos": {"h": 1, "w": 24, "x": 0, "y": 4},
+          "id": 10,
+          "title": "Nodes",
+          "type": "row"
+        },
+
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "fieldConfig": {
+            "defaults": {
+              "custom": {"align": "left", "displayMode": "auto"}
+            },
+            "overrides": [
+              {
+                "matcher": {"id": "byName", "options": "Phase"},
+                "properties": [
+                  {"id": "custom.displayMode", "value": "color-background"},
+                  {"id": "custom.width", "value": 120},
+                  {
+                    "id": "mappings",
+                    "value": [{
+                      "type": "value",
+                      "options": {
+                        "Ready":        {"color": "green",  "text": "Ready",        "index": 0},
+                        "Applying":     {"color": "yellow", "text": "Applying",     "index": 1},
+                        "Error":        {"color": "red",    "text": "Error",        "index": 2},
+                        "Provisioning": {"color": "blue",   "text": "Provisioning", "index": 3}
+                      }
+                    }]
+                  }
+                ]
+              },
+              {
+                "matcher": {"id": "byName", "options": "Role"},
+                "properties": [
+                  {"id": "custom.width", "value": 130},
+                  {
+                    "id": "mappings",
+                    "value": [{
+                      "type": "value",
+                      "options": {
+                        "ControlPlane": {"text": "Control Plane", "index": 0},
+                        "Worker":       {"text": "Worker",        "index": 1}
+                      }
+                    }]
+                  }
+                ]
+              },
+              {
+                "matcher": {"id": "byName", "options": "Config Size"},
+                "properties": [
+                  {"id": "unit", "value": "bytes"},
+                  {"id": "custom.width", "value": 110}
+                ]
+              },
+              {
+                "matcher": {"id": "byName", "options": "IP"},
+                "properties": [{"id": "custom.width", "value": 130}]
+              }
+            ]
+          },
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 5},
+          "id": 11,
+          "options": {"footer": {"show": false}, "showHeader": true},
+          "title": "Node Detail",
+          "type": "table",
+          "targets": [
+            {
+              "datasource": {"type": "prometheus", "uid": "${datasource}"},
+              "expr": "max by (name, cluster, role, ip, phase) (talos_node_phase{cluster=~\"$cluster\"} == 1)",
+              "instant": true,
+              "format": "table",
+              "legendFormat": "",
+              "refId": "Phase"
+            },
+            {
+              "datasource": {"type": "prometheus", "uid": "${datasource}"},
+              "expr": "max by (name, cluster) (talos_node_config_size_bytes{cluster=~\"$cluster\"})",
+              "instant": true,
+              "format": "table",
+              "legendFormat": "",
+              "refId": "Size"
+            }
+          ],
+          "transformations": [
+            {"id": "joinByField", "options": {"byField": "name", "mode": "outer"}},
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Time 1": true,
+                  "cluster": true,
+                  "cluster 1": true,
+                  "Value #Phase": true
+                },
+                "renameByName": {
+                  "name":        "Node",
+                  "ip":          "IP",
+                  "role":        "Role",
+                  "phase":       "Phase",
+                  "Value #Size": "Config Size"
+                },
+                "indexByName": {
+                  "name":        0,
+                  "ip":          1,
+                  "role":        2,
+                  "phase":       3,
+                  "Value #Size": 4
+                }
+              }
+            }
+          ]
+        },
+
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": {"mode": "palette-classic"}
+            }
+          },
+          "gridPos": {"h": 6, "w": 24, "x": 0, "y": 13},
+          "id": 12,
+          "options": {
+            "displayMode": "gradient",
+            "orientation": "horizontal",
+            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+            "showUnfilled": true,
+            "valueMode": "color"
+          },
+          "title": "Machine Config Sizes",
+          "type": "bargauge",
+          "targets": [{
+            "datasource": {"type": "prometheus", "uid": "${datasource}"},
+            "expr": "max by (name, role) (talos_node_config_size_bytes{cluster=~\"$cluster\"})",
+            "instant": true,
+            "legendFormat": "{{name}}"
+          }]
+        },
+
+        {
+          "collapsed": false,
+          "gridPos": {"h": 1, "w": 24, "x": 0, "y": 19},
+          "id": 20,
+          "title": "Reconcile Activity",
+          "type": "row"
+        },
+
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {"fillOpacity": 10, "lineWidth": 2, "spanNulls": false}
+            },
+            "overrides": [
+              {
+                "matcher": {"id": "byRegexp", "options": ".*error.*"},
+                "properties": [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}}]
+              },
+              {
+                "matcher": {"id": "byRegexp", "options": ".*success.*"},
+                "properties": [{"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}}]
+              }
+            ]
+          },
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20},
+          "id": 21,
+          "options": {
+            "legend": {"calcs": ["sum"], "displayMode": "table", "placement": "right"},
+            "tooltip": {"mode": "multi", "sort": "none"}
+          },
+          "title": "Reconcile Events",
+          "type": "timeseries",
+          "targets": [
+            {
+              "datasource": {"type": "prometheus", "uid": "${datasource}"},
+              "expr": "sum(increase(controller_runtime_reconcile_total{controller=~\"talosnode|taloscluster|talosclusterbootstrap\"}[$__rate_interval])) by (controller, result) > 0",
+              "legendFormat": "{{controller}} / {{result}}"
+            }
+          ]
+        },
+
+        {
+          "collapsed": false,
+          "gridPos": {"h": 1, "w": 24, "x": 0, "y": 28},
+          "id": 30,
+          "title": "API Performance",
+          "type": "row"
+        },
+
+        {
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {"fillOpacity": 5, "lineWidth": 2}
+            }
+          },
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 29},
+          "id": 31,
+          "options": {
+            "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "right"},
+            "tooltip": {"mode": "multi", "sort": "desc"}
+          },
+          "title": "Talos API Call Duration",
+          "type": "timeseries",
+          "targets": [
+            {
+              "datasource": {"type": "prometheus", "uid": "${datasource}"},
+              "expr": "histogram_quantile(0.50, sum(rate(talos_api_call_duration_seconds_bucket{result=\"success\"}[5m])) by (le, operation))",
+              "legendFormat": "p50 — {{operation}}"
+            },
+            {
+              "datasource": {"type": "prometheus", "uid": "${datasource}"},
+              "expr": "histogram_quantile(0.95, sum(rate(talos_api_call_duration_seconds_bucket{result=\"success\"}[5m])) by (le, operation))",
+              "legendFormat": "p95 — {{operation}}"
+            },
+            {
+              "datasource": {"type": "prometheus", "uid": "${datasource}"},
+              "expr": "histogram_quantile(0.99, sum(rate(talos_api_call_duration_seconds_bucket{result=\"success\"}[5m])) by (le, operation))",
+              "legendFormat": "p99 — {{operation}}"
+            }
+          ]
+        }
+
+      ],
+      "refresh": "30s",
+      "schemaVersion": 38,
+      "tags": ["talos", "kubernetes", "operator"],
+      "templating": {
+        "list": [
+          {
+            "current": {},
+            "hide": 0,
+            "includeAll": false,
+            "label": "Datasource",
+            "name": "datasource",
+            "options": [],
+            "query": "prometheus",
+            "refresh": 1,
+            "type": "datasource"
+          },
+          {
+            "current": {},
+            "datasource": {"type": "prometheus", "uid": "${datasource}"},
+            "hide": 0,
+            "includeAll": false,
+            "label": "Cluster",
+            "multi": false,
+            "name": "cluster",
+            "options": [],
+            "query": {"query": "label_values(talos_node_phase, cluster)", "refId": "StandardVariableQuery"},
+            "refresh": 2,
+            "sort": 1,
+            "type": "query"
+          }
+        ]
+      },
+      "time": {"from": "now-1h", "to": "now"},
+      "timepicker": {},
+      "timezone": "browser",
+      "title": "YK Talos Management",
+      "uid": "yk-talos-mgmt",
+      "version": 5
+    }

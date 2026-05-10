@@ -1,0 +1,59 @@
+# Lightweight kube-prometheus-stack for local kind development.
+# Strips heavy components; keeps Prometheus + Grafana only.
+
+# ── Alertmanager ──────────────────────────────────────────────────────────────
+alertmanager:
+  enabled: false
+
+# ── Prometheus ────────────────────────────────────────────────────────────────
+prometheus:
+  prometheusSpec:
+    # Discover all ServiceMonitors in the cluster regardless of labels.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelector: {}
+    serviceMonitorNamespaceSelector: {}
+    # Small retention for local use.
+    retention: 6h
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 512Mi
+
+# ── Grafana ───────────────────────────────────────────────────────────────────
+grafana:
+  adminPassword: admin
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  # Pre-load the Talos operator dashboard from the configmap.
+  sidecar:
+    dashboards:
+      enabled: true
+      searchNamespace: ALL
+
+# ── Node exporter ─────────────────────────────────────────────────────────────
+nodeExporter:
+  enabled: false
+prometheus-node-exporter:
+  enabled: false
+
+# ── kube-state-metrics ────────────────────────────────────────────────────────
+kubeStateMetrics:
+  enabled: false
+kube-state-metrics:
+  enabled: false
+
+# ── Other built-in scrapers (not available in kind) ───────────────────────────
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false

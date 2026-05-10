@@ -1,7 +1,9 @@
 .PHONY: all manifests build test test-cover lint fmt tidy run clean \
-        kind-up kind-down kind-deploy \
+        kind-up kind-down kind-deploy kind-install-crds kind-load \
+        monitoring-up monitoring-down \
+        talos-up talos-down talos-ips talos-clean \
         controller-gen crd-ref-docs api-docs \
-        docker-build docker-push buildx-setup \
+        docker-build docker-build-local docker-push buildx-setup \
         install-hooks deps-check \
         help
 
@@ -116,7 +118,7 @@ build:
 
 ## run: run the manager locally (webhooks disabled — no TLS outside a cluster)
 run: build
-	DISABLE_WEBHOOKS=true ./$(BINARY)
+	DISABLE_WEBHOOKS=true ./$(BINARY) --zap-encoder=console --zap-log-level=1
 
 ## clean: remove build artefacts
 clean:
@@ -128,6 +130,16 @@ clean:
 buildx-setup:
 	docker buildx create --name multiplatform --driver docker-container --bootstrap --use 2>/dev/null || \
 	  docker buildx inspect --bootstrap multiplatform
+
+## docker-build-local: build image for current platform and load into local Docker daemon (for kind)
+docker-build-local:
+	docker build \
+	  --build-arg VERSION=$(VERSION) \
+	  --build-arg COMMIT=$(GIT_COMMIT) \
+	  --build-arg BUILD_DATE=$(BUILD_DATE) \
+	  -t $(IMAGE):$(VERSION) \
+	  -t $(IMAGE):latest \
+	  .
 
 ## docker-build: build multi-arch image (does not push)
 docker-build: buildx-setup
@@ -154,19 +166,86 @@ docker-push: buildx-setup
 	  --push \
 	  .
 
+# ── Talos nodes (ephemeral Docker containers) ─────────────────────────────────
+
+# Talos version must match the machinery version in go.mod.
+TALOS_VERSION        ?= v1.13.0
+TALOS_DOCKER_NETWORK ?= talos-test
+TALOS_NODE_NAME      ?= cp1
+TALOS_NODES_SCRIPT   := hack/talos-nodes.sh
+
+TALOS_ENV = \
+  TALOS_VERSION=$(TALOS_VERSION) \
+  TALOS_DOCKER_NETWORK=$(TALOS_DOCKER_NETWORK) \
+  TALOS_NODE_NAME=$(TALOS_NODE_NAME) \
+  KIND_CLUSTER=$(KIND_CLUSTER)
+
+## talos-up: start one ephemeral Talos Docker node (TALOS_NODE_NAME=cp1)
+talos-up:
+	$(TALOS_ENV) $(TALOS_NODES_SCRIPT) up
+
+## talos-down: stop and remove a specific Talos Docker node (TALOS_NODE_NAME=cp1)
+talos-down:
+	$(TALOS_ENV) $(TALOS_NODES_SCRIPT) down
+
+## talos-ips: print IP addresses of running Talos nodes on the kind network
+talos-ips:
+	$(TALOS_ENV) $(TALOS_NODES_SCRIPT) ips
+
+## talos-clean: force-remove all containers on the Talos Docker network, then remove the network
+talos-clean:
+	@docker ps -aq --filter network=$(TALOS_DOCKER_NETWORK) | xargs docker rm -f 2>/dev/null || true
+	@docker network rm $(TALOS_DOCKER_NETWORK) 2>/dev/null || true
+	@echo "All containers on network '$(TALOS_DOCKER_NETWORK)' removed."
+
 # ── Kind cluster ──────────────────────────────────────────────────────────────
 
-## kind-up: create local Kind cluster
+## kind-up: create local Kind cluster (no-op if already exists)
 kind-up:
-	kind create cluster --name $(KIND_CLUSTER) --config $(KIND_CONFIG)
+	@kind get clusters 2>/dev/null | grep -q "^$(KIND_CLUSTER)$$" \
+	  && echo "Kind cluster '$(KIND_CLUSTER)' already exists, skipping." \
+	  || kind create cluster --name $(KIND_CLUSTER) --config $(KIND_CONFIG)
+
+## kind-install-crds: install only CRDs into kind (no operator deployment — use with make run)
+kind-install-crds: manifests
+	kubectl --context kind-$(KIND_CLUSTER) apply -k config/crd/
 
 ## kind-down: delete local Kind cluster
 kind-down:
 	kind delete cluster --name $(KIND_CLUSTER)
 
-## kind-deploy: apply CRDs, RBAC, and manager deployment to the current cluster
-kind-deploy: manifests
-	kubectl apply -k config/default/
+## kind-load: build image for current platform and load it into the kind cluster
+kind-load: docker-build-local
+	kind load docker-image $(IMAGE):latest --name $(KIND_CLUSTER)
+	@echo "Loaded $(IMAGE):latest into kind cluster '$(KIND_CLUSTER)'"
+
+## kind-deploy: create cluster, build+load image, apply manifests, restart operator pod
+kind-deploy: manifests kind-up kind-load
+	kubectl --context kind-$(KIND_CLUSTER) apply -k config/default/
+	kubectl --context kind-$(KIND_CLUSTER) rollout restart deployment/yk-talos-management \
+	  -n yk-talos-management-system
+
+# ── Monitoring (local kind) ───────────────────────────────────────────────────
+
+MONITORING_NAMESPACE  ?= monitoring
+MONITORING_RELEASE    ?= kube-prometheus-stack
+MONITORING_VALUES     ?= hack/monitoring/kube-prometheus-stack-values.yaml
+
+## monitoring-up: install kube-prometheus-stack and apply the ServiceMonitor for the operator
+monitoring-up:
+	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || true
+	helm repo update prometheus-community
+	kubectl get namespace $(MONITORING_NAMESPACE) >/dev/null 2>&1 || kubectl create namespace $(MONITORING_NAMESPACE)
+	helm upgrade --install $(MONITORING_RELEASE) prometheus-community/kube-prometheus-stack \
+	  --namespace $(MONITORING_NAMESPACE) \
+	  --values $(MONITORING_VALUES) \
+	  --wait
+	kubectl --context kind-$(KIND_CLUSTER) apply -k config/monitoring/
+
+## monitoring-down: uninstall kube-prometheus-stack from the kind cluster
+monitoring-down:
+	helm uninstall $(MONITORING_RELEASE) --namespace $(MONITORING_NAMESPACE) || true
+	kubectl delete namespace $(MONITORING_NAMESPACE) --ignore-not-found
 
 # ── Help ──────────────────────────────────────────────────────────────────────
 

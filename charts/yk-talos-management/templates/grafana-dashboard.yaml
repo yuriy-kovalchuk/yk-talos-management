@@ -1,0 +1,13 @@
+{{- if and .Values.metrics.enabled .Values.metrics.grafanaDashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "yk-talos-management.fullname" . }}-dashboard
+  namespace: {{ .Values.metrics.grafanaDashboard.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "yk-talos-management.labels" . | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  yk-talos-management.json: |
+{{ .Files.Get "files/grafana-dashboard.json" | indent 4 }}
+{{- end }}

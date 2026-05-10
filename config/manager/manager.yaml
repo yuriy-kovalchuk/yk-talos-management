@@ -26,6 +26,7 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - --leader-elect
+            - --zap-log-level=1
           env:
             - name: POD_NAMESPACE
               valueFrom:

@@ -44,7 +44,7 @@ Update (spec changed)
   └─ save merged config to {node}-config secret
 
 Periodic (driftCheckInterval = 5 min, if spec.driftDetection=true)
-  └─ Dial → GetMachineConfig from /system/state/config.yaml
+  └─ Dial → GetMachineConfig via COSI resource API (MachineConfigType / ActiveID)
   └─ compare semantically with {node}-config secret
   └─ re-apply if different; skip silently if node unreachable
 

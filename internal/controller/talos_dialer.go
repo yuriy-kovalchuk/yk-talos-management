@@ -15,7 +15,7 @@ type TalosDialer interface {
 
 // TalosConnection is an active connection to a Talos node.
 type TalosConnection interface {
-	ApplyConfig(ctx context.Context, nodeIP string, cfg []byte) error
+	ApplyConfig(ctx context.Context, nodeIP string, cfg []byte, cluster string) error
 	Bootstrap(ctx context.Context, endpoint string) error
 	GetKubeconfig(ctx context.Context, endpoint string) ([]byte, error)
 	GetMachineConfig(ctx context.Context, nodeIP string) ([]byte, error)
@@ -47,8 +47,8 @@ type realConnection struct {
 	c *talos.Client
 }
 
-func (r *realConnection) ApplyConfig(ctx context.Context, nodeIP string, cfg []byte) error {
-	return talos.ApplyConfig(ctx, r.c, nodeIP, cfg)
+func (r *realConnection) ApplyConfig(ctx context.Context, nodeIP string, cfg []byte, cluster string) error {
+	return talos.ApplyConfig(ctx, r.c, nodeIP, cfg, cluster)
 }
 
 func (r *realConnection) Bootstrap(ctx context.Context, endpoint string) error {

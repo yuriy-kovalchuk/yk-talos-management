@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 
+	appmetrics "github.com/yuriy-kovalchuk/yk-talos-management/internal/metrics"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,12 +33,23 @@ func upsertSecret(ctx context.Context, c client.Client, name, namespace string, 
 	existing, err := getSecret(ctx, c, name, namespace)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return c.Create(ctx, newFn())
+			err = c.Create(ctx, newFn())
+			appmetrics.SecretOperationsTotal.WithLabelValues("create", resultLabel(err)).Inc()
+			return err
 		}
 		return err
 	}
 	updateFn(existing)
-	return c.Update(ctx, existing)
+	err = c.Update(ctx, existing)
+	appmetrics.SecretOperationsTotal.WithLabelValues("update", resultLabel(err)).Inc()
+	return err
+}
+
+func resultLabel(err error) string {
+	if err != nil {
+		return "error"
+	}
+	return "success"
 }
 
 // newSecret builds a bare Opaque Secret with a single data key.

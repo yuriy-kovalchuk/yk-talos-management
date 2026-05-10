@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/yuriy-kovalchuk/yk-talos-management/internal/config"
+	appmetrics "github.com/yuriy-kovalchuk/yk-talos-management/internal/metrics"
 	"github.com/yuriy-kovalchuk/yk-talos-management/internal/talos"
 )
 
@@ -53,6 +54,7 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 	l.V(1).Info("Reconciling TalosClusterBootstrap", "name", bootstrap.Name, "generation", bootstrap.Generation)
 	start := time.Now()
 	defer func() { l.V(1).Info("reconcile done", "duration", time.Since(start)) }()
+	appmetrics.RecordBootstrapPhase(bootstrap.Spec.ClusterRef, bootstrap.Namespace, string(bootstrap.Status.Phase), string(bootstrap.Status.Phase))
 
 	if bootstrap.DeletionTimestamp != nil {
 		return r.handleDeletion(ctx, &bootstrap)
@@ -94,6 +96,7 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 		v1alpha1.TalosClusterBootstrapConditionBootstrapped, metav1.ConditionTrue)
 
 	bootstrap.Status.ObservedGeneration = bootstrap.Generation
+	appmetrics.RecordBootstrapPhase(bootstrap.Spec.ClusterRef, bootstrap.Namespace, string(bootstrap.Status.Phase), string(v1alpha1.TalosClusterBootstrapPhaseBootstrapping))
 	bootstrap.Status.Phase = v1alpha1.TalosClusterBootstrapPhaseBootstrapping
 	if !alreadyBootstrapped {
 		talos.SetConditionStatus(&bootstrap.Status.Conditions,
@@ -159,6 +162,7 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 		bootstrap.Status.RetryCount++
 		delay := config.GetRetryDelay(bootstrap.Status.RetryCount)
 		l.Error(err, "get kubeconfig failed", "endpoint", dialedTo, "attempt", bootstrap.Status.RetryCount, "requeueAfter", delay)
+		appmetrics.RecordBootstrapPhase(bootstrap.Spec.ClusterRef, bootstrap.Namespace, string(v1alpha1.TalosClusterBootstrapPhaseBootstrapping), string(v1alpha1.TalosClusterBootstrapPhaseWaitingForKubeconfig))
 		bootstrap.Status.Phase = v1alpha1.TalosClusterBootstrapPhaseWaitingForKubeconfig
 		talos.SetConditionStatus(&bootstrap.Status.Conditions,
 			v1alpha1.TalosClusterBootstrapConditionKubeconfig, metav1.ConditionFalse,
@@ -173,6 +177,7 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 		return r.setError(ctx, &bootstrap, fmt.Errorf("save kubeconfig: %w", err))
 	}
 
+	appmetrics.RecordBootstrapPhase(bootstrap.Spec.ClusterRef, bootstrap.Namespace, string(bootstrap.Status.Phase), string(v1alpha1.TalosClusterBootstrapPhaseCompleted))
 	bootstrap.Status.Phase = v1alpha1.TalosClusterBootstrapPhaseCompleted
 	bootstrap.Status.Message = "Bootstrap completed"
 	talos.SetConditionStatus(&bootstrap.Status.Conditions,
@@ -182,6 +187,7 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, fmt.Errorf("update final status: %w", err)
 	}
 
+	appmetrics.BootstrapDuration.WithLabelValues(bootstrap.Spec.ClusterRef).Observe(time.Since(bootstrap.CreationTimestamp.Time).Seconds())
 	emitEvent(r.Recorder, &bootstrap, corev1.EventTypeNormal, "Completed", "Bootstrap complete; kubeconfig stored")
 	l.Info("Bootstrap complete", "endpoint", dialedTo)
 	return ctrl.Result{}, nil
@@ -198,6 +204,7 @@ func (r *TalosClusterBootstrapReconciler) waitForReadyNodes(ctx context.Context,
 	if ready > 0 {
 		return ctrl.Result{}, true, nil
 	}
+	appmetrics.RecordBootstrapPhase(bootstrap.Spec.ClusterRef, bootstrap.Namespace, string(bootstrap.Status.Phase), string(v1alpha1.TalosClusterBootstrapPhaseWaitingForNodes))
 	bootstrap.Status.Phase = v1alpha1.TalosClusterBootstrapPhaseWaitingForNodes
 	bootstrap.Status.Message = "Waiting for at least one control plane node to reach Ready phase"
 	if err := r.Status().Update(ctx, bootstrap); err != nil {
@@ -255,6 +262,7 @@ func (r *TalosClusterBootstrapReconciler) saveKubeconfig(ctx context.Context, cl
 }
 
 func (r *TalosClusterBootstrapReconciler) setError(ctx context.Context, bootstrap *v1alpha1.TalosClusterBootstrap, err error) (ctrl.Result, error) {
+	appmetrics.RecordBootstrapPhase(bootstrap.Spec.ClusterRef, bootstrap.Namespace, string(bootstrap.Status.Phase), string(v1alpha1.TalosClusterBootstrapPhaseError))
 	bootstrap.Status.Phase = v1alpha1.TalosClusterBootstrapPhaseError
 	bootstrap.Status.Message = err.Error()
 	emitEvent(r.Recorder, bootstrap, corev1.EventTypeWarning, "Failed", err.Error())
