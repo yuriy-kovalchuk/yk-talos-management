@@ -38,15 +38,16 @@ type TalosNodeReconciler struct {
 
 func (r *TalosNodeReconciler) setError(ctx context.Context, node *v1alpha1.TalosNode, err error) (ctrl.Result, error) {
 	l := log.FromContext(ctx)
-	l.Error(err, "apply config failed", "node", node.Name, "ip", node.Spec.NodeIP, "retry", node.Status.RetryCount+1)
 	node.Status.Phase = v1alpha1.TalosNodePhaseError
 	node.Status.RetryCount++
 	node.Status.Message = err.Error()
+	delay := config.GetRetryDelay(node.Status.RetryCount)
+	l.Error(err, "apply config failed", "ip", node.Spec.NodeIP, "attempt", node.Status.RetryCount, "requeueAfter", delay)
 	emitEvent(r.Recorder, node, corev1.EventTypeWarning, "ApplyFailed", err.Error())
 	if updateErr := r.Status().Update(ctx, node); updateErr != nil {
 		l.Error(updateErr, "update error status")
 	}
-	return ctrl.Result{RequeueAfter: config.GetRetryDelay(node.Status.RetryCount)}, nil
+	return ctrl.Result{RequeueAfter: delay}, nil
 }
 
 func (r *TalosNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -57,7 +58,9 @@ func (r *TalosNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	l.Info("Reconciling TalosNode", "name", node.Name, "ip", node.Spec.NodeIP, "generation", node.Generation)
+	l.V(1).Info("Reconciling TalosNode", "name", node.Name, "ip", node.Spec.NodeIP, "generation", node.Generation)
+	start := time.Now()
+	defer func() { l.V(1).Info("reconcile done", "duration", time.Since(start)) }()
 
 	if node.DeletionTimestamp != nil {
 		return r.handleDeletion(ctx, &node)
@@ -132,29 +135,29 @@ func (r *TalosNodeReconciler) checkDrift(ctx context.Context, node *v1alpha1.Tal
 
 	conn, err := r.Talos.Dial(ctx, talosconfigSecret.Data["talosconfig"], node.Spec.NodeIP)
 	if err != nil {
-		l.Info("drift check: node unreachable, will retry", "node", node.Name, "ip", node.Spec.NodeIP)
+		l.Info("drift check: node unreachable, will retry", "ip", node.Spec.NodeIP, "requeueAfter", driftCheckInterval)
 		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
 	}
 	defer conn.Close() //nolint:errcheck
 
 	remoteBytes, err := conn.GetMachineConfig(ctx, node.Spec.NodeIP)
 	if err != nil {
-		l.Info("drift check: could not read remote config, will retry", "node", node.Name, "ip", node.Spec.NodeIP, "err", err)
+		l.Error(err, "drift check: could not read remote config, will retry", "ip", node.Spec.NodeIP, "requeueAfter", driftCheckInterval)
 		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
 	}
 
 	drifted, err := configsDiffer(savedSecret.Data["config.yaml"], remoteBytes)
 	if err != nil {
-		l.Error(err, "drift check: comparison failed", "node", node.Name)
+		l.Error(err, "drift check: comparison failed", "ip", node.Spec.NodeIP)
 		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
 	}
 
 	if !drifted {
-		l.V(1).Info("drift check: config in sync", "node", node.Name, "ip", node.Spec.NodeIP)
+		l.V(1).Info("drift check: config in sync", "ip", node.Spec.NodeIP)
 		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
 	}
 
-	l.Info("drift detected, re-applying config", "node", node.Name, "ip", node.Spec.NodeIP)
+	l.Info("drift detected, re-applying config", "ip", node.Spec.NodeIP)
 	emitEvent(r.Recorder, node, corev1.EventTypeWarning, "DriftDetected", "Node config drift detected, re-applying")
 
 	// Force re-apply: clear observed generation so applyConfig treats this as an update.
@@ -226,22 +229,22 @@ func (r *TalosNodeReconciler) handleEtcdLeave(ctx context.Context, node *v1alpha
 
 	if node.Status.DeletionAttempts < etcdLeaveMaxAttempts {
 		if err := r.tryEtcdLeave(ctx, node.Spec.NodeIP, talosconfig); err != nil {
-			l.Error(err, "etcd leave failed, will retry", "node", node.Name, "ip", node.Spec.NodeIP, "attempt", node.Status.DeletionAttempts+1)
 			node.Status.DeletionAttempts++
+			l.Error(err, "etcd leave failed, will retry", "ip", node.Spec.NodeIP, "attempt", node.Status.DeletionAttempts, "requeueAfter", etcdLeaveRetryDelay)
 			if updateErr := r.Status().Update(ctx, node); updateErr != nil {
 				l.Error(updateErr, "update deletion attempts status")
 			}
 			return false, ctrl.Result{RequeueAfter: etcdLeaveRetryDelay}, nil
 		}
-		l.Info("etcd leave succeeded", "node", node.Name, "ip", node.Spec.NodeIP)
+		l.Info("etcd leave succeeded", "ip", node.Spec.NodeIP)
 		return true, ctrl.Result{}, nil
 	}
 
 	// Max graceful attempts exceeded — force-remove via a surviving peer.
-	l.Info("etcd leave max attempts exceeded, escalating to force-remove", "node", node.Name, "ip", node.Spec.NodeIP, "attempts", node.Status.DeletionAttempts)
+	l.Info("etcd leave max attempts exceeded, escalating to force-remove", "ip", node.Spec.NodeIP, "attempts", node.Status.DeletionAttempts)
 	peers := survivingPeers(endpoints, node.Spec.NodeIP)
 	if len(peers) == 0 {
-		l.Info("no surviving peers available, skipping etcd force-remove", "node", node.Name)
+		l.Info("no surviving peers available, skipping etcd force-remove")
 		return true, ctrl.Result{}, nil
 	}
 	conn, survivorEP, err := dialAny(ctx, r.Talos, talosconfig, peers)

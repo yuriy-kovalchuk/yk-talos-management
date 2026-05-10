@@ -32,6 +32,9 @@ spec:
             {{- if .Values.leaderElection.enabled }}
             - --leader-elect
             {{- end }}
+            {{- if .Values.logLevel }}
+            - --zap-log-level={{ .Values.logLevel }}
+            {{- end }}
           env:
             - name: POD_NAMESPACE
               valueFrom:

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/yuriy-kovalchuk/yk-talos-management/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -37,7 +38,9 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	l.Info("Reconciling TalosCluster", "name", cluster.Name, "generation", cluster.Generation)
+	l.V(1).Info("Reconciling TalosCluster", "name", cluster.Name, "generation", cluster.Generation)
+	start := time.Now()
+	defer func() { l.V(1).Info("reconcile done", "duration", time.Since(start)) }()
 
 	if cluster.DeletionTimestamp != nil {
 		return r.handleDeletion(ctx, &cluster)
@@ -49,7 +52,7 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if isUpToDate(&cluster) {
-		l.Info("Cluster up-to-date, skipping", "generation", cluster.Generation)
+		l.V(1).Info("Cluster up-to-date, skipping", "generation", cluster.Generation)
 		return ctrl.Result{}, nil
 	}
 

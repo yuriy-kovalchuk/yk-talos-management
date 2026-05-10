@@ -34,6 +34,9 @@ metrics:
     type: ClusterIP
     port: 8080
 
+# Zap log level. 0 = info, 1 = debug (V(1)), 2+ = trace.
+logLevel: 1
+
 # Leader election — should always be enabled in production.
 leaderElection:
   enabled: true
