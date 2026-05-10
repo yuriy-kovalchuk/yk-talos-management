@@ -27,6 +27,15 @@ go.work.sum
 # Env files
 .env
 
+# AI assistant context files
+CLAUDE.md
+GEMINI.md
+.gemini/
+AGENTS.md
+.cursor/
+.copilot/
+.github/copilot-instructions.md
+
 # IDEs and Editors
 .idea/
 .vscode/

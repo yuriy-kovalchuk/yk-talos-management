@@ -7,6 +7,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version
 
 ## [Unreleased]
 
+---
+
+## [0.3.1-alpha] - 2026-05-10
+
+### Added
+- `SECURITY.md` with vulnerability reporting policy
+- Tag version format validation in pre-push hook (`v1.0.0` and `v1.0.0-alpha` style)
+
+### Fixed
+- Drift detection now uses the COSI resource API (`MachineConfigs/v1alpha1`) to read the running machine config instead of a raw file read on the state partition; resolves `NotFound` errors on healthy booted nodes
+
+---
+
+## [0.3.0-alpha] - 2026-05-10
+
 ### Added
 - `spec.patchesFrom` on `TalosNode`: reference Kubernetes Secrets as patch sources, applied after inline `spec.patches`; supports both merge and standalone document patches
 - Config drift detection for `TalosNode`: periodic comparison of running vs desired machine config via Talos API; opt-out per node via `spec.driftDetection=false` (default: `true`); offline nodes skipped silently
@@ -20,6 +35,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version
 - Kustomize install path (`kubectl apply -k config/default/`): CRD bases, RBAC, Deployment, and metrics Service; names aligned with Helm chart
 - Dependabot configured for Go modules, Docker base image, and GitHub Actions (weekly, grouped PRs)
 - CI job verifying generated CRD/RBAC manifests match controller-gen output on every PR
+- Conventional commit format enforcement in pre-push hook
 
 ### Fixed
 - `cluster:`-level patches now correctly deep-merged into base machine config instead of being appended as standalone YAML documents
