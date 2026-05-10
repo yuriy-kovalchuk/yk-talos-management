@@ -3,8 +3,8 @@ module github.com/yuriy-kovalchuk/yk-talos-management
 go 1.26.1
 
 require (
+	github.com/cosi-project/runtime v1.14.1
 	github.com/siderolabs/talos/pkg/machinery v1.13.0
-	go.yaml.in/yaml/v3 v3.0.4
 	google.golang.org/grpc v1.79.3
 	k8s.io/api v0.35.3
 	k8s.io/apimachinery v0.35.3
@@ -30,7 +30,6 @@ require (
 	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/containerd/go-cni v1.1.13 // indirect
 	github.com/containernetworking/cni v1.3.0 // indirect
-	github.com/cosi-project/runtime v1.14.1 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.12.2 // indirect
@@ -86,6 +85,7 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.1 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
+	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.4 // indirect
 	golang.org/x/crypto v0.49.0 // indirect
 	golang.org/x/exp v0.0.0-20250128182459-e0ece0dbea4c // indirect

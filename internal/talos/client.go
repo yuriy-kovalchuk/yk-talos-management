@@ -5,12 +5,12 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/cosi-project/runtime/pkg/resource"
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	machineconfig "github.com/siderolabs/talos/pkg/machinery/config"
@@ -19,6 +19,7 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/config/machine"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
+	resourceconfig "github.com/siderolabs/talos/pkg/machinery/resources/config"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -200,17 +201,26 @@ func GetKubeconfig(ctx context.Context, c *Client, endpoint string) ([]byte, err
 	return c.Kubeconfig(talosclient.WithNode(ctx, endpoint))
 }
 
-// GetMachineConfig reads the running machine config from the node's state partition.
+// GetMachineConfig retrieves the active running machine config from the node via the COSI resource API.
+// This is equivalent to `talosctl get machineconfig v1alpha1` and works reliably on booted nodes.
 func GetMachineConfig(ctx context.Context, c *Client, nodeIP string) ([]byte, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 
-	r, err := c.Read(talosclient.WithNode(ctx, nodeIP), constants.StateMountPoint+"/"+constants.ConfigFilename)
+	r, err := c.COSI.Get(
+		talosclient.WithNode(ctx, nodeIP),
+		resource.NewMetadata(resourceconfig.NamespaceName, resourceconfig.MachineConfigType, resourceconfig.ActiveID, resource.VersionUndefined),
+	)
 	if err != nil {
 		return nil, err
 	}
-	defer r.Close() //nolint:errcheck
-	return io.ReadAll(r)
+
+	mc, ok := r.(*resourceconfig.MachineConfig)
+	if !ok {
+		return nil, fmt.Errorf("unexpected resource type %T", r)
+	}
+
+	return mc.Provider().Bytes()
 }
 
 // EtcdLeave instructs the given node to remove itself from the etcd cluster.
