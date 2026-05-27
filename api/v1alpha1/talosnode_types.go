@@ -13,6 +13,10 @@ const (
 	TalosNodePhaseApplying TalosNodePhase = "Applying"
 	TalosNodePhaseReady    TalosNodePhase = "Ready"
 	TalosNodePhaseError    TalosNodePhase = "Error"
+	// TalosNodePhaseDeleting is set as soon as the deletion finalizer starts
+	// processing — drain, etcd leave, and config cleanup. The phase persists
+	// until the finalizer is removed and the object is gone.
+	TalosNodePhaseDeleting TalosNodePhase = "Deleting"
 )
 
 type TalosNodeRole string
@@ -55,6 +59,26 @@ type TalosNodeSpec struct {
 	// and re-applies if it diverges from the desired state. Set to false for nodes
 	// that are frequently offline (e.g. homelab nodes powered down overnight).
 	DriftDetection *bool `json:"driftDetection,omitempty"`
+
+	// When true, skip Kubernetes node drain (cordon + pod eviction) during node removal.
+	// Use for nodes that are already unreachable or when fast removal is required.
+	// +optional
+	// +kubebuilder:default=false
+	SkipDrain bool `json:"skipDrain,omitempty"`
+
+	// Maximum time to wait for all pods to be evicted during node drain.
+	// Defaults to 5 minutes.
+	// +optional
+	DrainTimeout *metav1.Duration `json:"drainTimeout,omitempty"`
+
+	// When true, the operator wipes the node's ephemeral state and reboots it into
+	// maintenance mode as part of the deletion sequence (after etcd leave, before the
+	// config secret is removed). Useful when the node hardware will be repurposed —
+	// the next TalosNode pointing at the same IP will apply a fresh config.
+	// Best-effort: a reset failure is logged and emits an event but never blocks deletion.
+	// +optional
+	// +kubebuilder:default=false
+	ResetOnDelete bool `json:"resetOnDelete,omitempty"`
 }
 
 type TalosNodeStatus struct {

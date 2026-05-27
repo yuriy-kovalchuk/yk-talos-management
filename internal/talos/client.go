@@ -21,6 +21,7 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
 	resourceconfig "github.com/siderolabs/talos/pkg/machinery/resources/config"
+	resourcenetwork "github.com/siderolabs/talos/pkg/machinery/resources/network"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -237,6 +238,47 @@ func GetMachineConfig(ctx context.Context, c *Client, nodeIP string) ([]byte, er
 	}
 
 	return mc.Provider().Bytes()
+}
+
+// GetHostname retrieves the node's hostname via the COSI network resource API.
+// The hostname is the Kubernetes Node name that kubelet registered with — use
+// this instead of searching by IP to find the k8s Node object reliably across
+// multi-homed setups where spec.nodeIP may not match the kubelet's primary NIC.
+func GetHostname(ctx context.Context, c *Client, nodeIP string) (string, error) {
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
+
+	start := time.Now()
+	r, err := c.COSI.Get(
+		talosclient.WithNode(ctx, nodeIP),
+		resource.NewMetadata(resourcenetwork.NamespaceName, resourcenetwork.HostnameStatusType, resourcenetwork.HostnameID, resource.VersionUndefined),
+	)
+	appmetrics.APICallDuration.WithLabelValues("get_hostname", resultLabel(err)).Observe(time.Since(start).Seconds())
+	if err != nil {
+		return "", err
+	}
+
+	hs, ok := r.(*resourcenetwork.HostnameStatus)
+	if !ok {
+		return "", fmt.Errorf("unexpected resource type %T", r)
+	}
+
+	return hs.TypedSpec().Hostname, nil
+}
+
+// ResetNode wipes the node's ephemeral state and reboots it into maintenance mode.
+// Graceful is false so the reset proceeds even when the kubelet is in a degraded state.
+// Used for the standalone annotation-triggered reset and the spec.resetOnDelete path.
+func ResetNode(ctx context.Context, c *Client, nodeIP string) error {
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
+	start := time.Now()
+	err := c.ResetGeneric(talosclient.WithNode(ctx, nodeIP), &machineapi.ResetRequest{
+		Graceful: false,
+		Reboot:   true,
+	})
+	appmetrics.APICallDuration.WithLabelValues("reset_node", resultLabel(err)).Observe(time.Since(start).Seconds())
+	return err
 }
 
 // EtcdLeave instructs the given node to remove itself from the etcd cluster.

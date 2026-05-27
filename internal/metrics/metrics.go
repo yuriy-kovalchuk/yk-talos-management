@@ -73,6 +73,12 @@ var (
 		Help:    "End-to-end duration of a TalosClusterBootstrap from object creation to completion.",
 		Buckets: []float64{5, 10, 30, 60, 120, 300, 600},
 	}, []string{"cluster"})
+
+	// NodeDrainTotal counts node drain outcomes (cordon + pod eviction + node deletion) by result.
+	NodeDrainTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "talos_node_drain_total",
+		Help: "Total node drain operations by result (success, skipped, timeout, error).",
+	}, []string{"result", "cluster"})
 )
 
 func init() {
@@ -88,6 +94,7 @@ func init() {
 		APICallDuration,
 		SecretOperationsTotal,
 		BootstrapDuration,
+		NodeDrainTotal,
 	)
 }
 

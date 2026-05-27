@@ -13,7 +13,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -28,13 +31,14 @@ import (
 // +kubebuilder:rbac:groups=talos.yuriykovalchuk.dev,resources=talosnodes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=talos.yuriykovalchuk.dev,resources=talosnodes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=talos.yuriykovalchuk.dev,resources=talosclusters,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;delete
 
 type TalosNodeReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Talos    TalosDialer
-	Recorder record.EventRecorder
+	Scheme          *runtime.Scheme
+	Talos           TalosDialer
+	Recorder        record.EventRecorder
+	NewRemoteClient func(kubeconfig []byte) (kubernetes.Interface, error)
 }
 
 func (r *TalosNodeReconciler) setError(ctx context.Context, node *v1alpha1.TalosNode, err error) (ctrl.Result, error) {
@@ -75,6 +79,13 @@ func (r *TalosNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	talos.AddFinalizer(&node.Finalizers, talos.FinalizerCleanup)
 	if err := r.Update(ctx, &node); err != nil {
 		return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
+	}
+
+	// Standalone reset: annotation triggers a one-shot wipe+reboot to maintenance mode.
+	// The annotation is removed before the reset call so a crash mid-reset does not loop.
+	// On success the controller clears ConfigApplied so the next reconcile re-applies config.
+	if node.Annotations[talos.AnnotationReset] == "true" {
+		return r.handleStandaloneReset(ctx, &node)
 	}
 
 	if isNodeUpToDate(&node) {
@@ -200,10 +211,65 @@ func (r *TalosNodeReconciler) handleDeletion(ctx context.Context, node *v1alpha1
 		return ctrl.Result{}, nil
 	}
 
+	// Transition to Deleting on first entry so the phase reflects progress during
+	// what can be a multi-minute drain + etcd-leave sequence.
+	if node.Status.Phase != v1alpha1.TalosNodePhaseDeleting {
+		fromPhase := node.Status.Phase
+		node.Status.Phase = v1alpha1.TalosNodePhaseDeleting
+		appmetrics.RecordNodePhase(node.Name, node.Namespace, node.Spec.ClusterRef, string(node.Spec.Role), node.Spec.NodeIP, string(fromPhase), string(v1alpha1.TalosNodePhaseDeleting))
+		if err := r.Status().Update(ctx, node); err != nil {
+			return ctrl.Result{}, fmt.Errorf("update deleting phase: %w", err)
+		}
+	}
+
+	// Guard: refuse to delete the last active ControlPlane in the cluster.
+	// Removing the last CP destroys etcd quorum and the API server — the user must
+	// add a replacement CP first, or delete the entire TalosCluster object instead.
+	if node.Spec.Role == v1alpha1.TalosNodeRoleControlPlane {
+		last, err := r.isLastControlPlane(ctx, node)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("check last control plane: %w", err)
+		}
+		if last {
+			log.FromContext(ctx).Info(
+				"deletion blocked: this is the last ControlPlane node — add a replacement CP first, or delete the TalosCluster to tear down the entire cluster",
+				"name", node.Name, "cluster", node.Spec.ClusterRef)
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+	}
+
+	if skipDrain(node) {
+		log.FromContext(ctx).V(1).Info("drain skipped", "name", node.Name,
+			"reason", drainSkipReason(node))
+		appmetrics.NodeDrainTotal.WithLabelValues("skipped", node.Spec.ClusterRef).Inc()
+	} else {
+		done, result, err := r.drainAndDeleteNode(ctx, node)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !done {
+			return result, nil
+		}
+	}
+
 	if node.Spec.Role == v1alpha1.TalosNodeRoleControlPlane {
 		done, result, err := r.handleEtcdLeave(ctx, node)
 		if !done {
 			return result, err
+		}
+	}
+
+	// Reset-on-delete: wipe the node before cleanup so it returns to maintenance mode.
+	// Best-effort — failure is logged and emits an event but never blocks deletion.
+	if node.Spec.ResetOnDelete {
+		l := log.FromContext(ctx)
+		emitEvent(r.Recorder, node, corev1.EventTypeNormal, "NodeResetTriggered", "Resetting node before cleanup (spec.resetOnDelete)")
+		if err := r.tryReset(ctx, node); err != nil {
+			l.Error(err, "reset-on-delete failed, proceeding with cleanup", "ip", node.Spec.NodeIP)
+			emitEvent(r.Recorder, node, corev1.EventTypeWarning, "NodeResetFailed", fmt.Sprintf("reset-on-delete failed: %v", err))
+		} else {
+			l.Info("node reset complete", "ip", node.Spec.NodeIP)
+			emitEvent(r.Recorder, node, corev1.EventTypeNormal, "NodeResetComplete", "Node reset successfully")
 		}
 	}
 
@@ -217,12 +283,97 @@ func (r *TalosNodeReconciler) handleDeletion(ctx context.Context, node *v1alpha1
 		}
 	}
 
+	// For ControlPlane nodes: remove the dead IP from TalosCluster.spec.endpoints, then
+	// update the kubeconfig Secret so its server URL points to a surviving endpoint.
+	// Both steps are best-effort — failures are logged but do not block finalizer removal.
+	if node.Spec.Role == v1alpha1.TalosNodeRoleControlPlane {
+		l := log.FromContext(ctx)
+		if err := r.removeEndpointFromCluster(ctx, node); err != nil {
+			l.Error(err, "could not remove endpoint from TalosCluster, proceeding with cleanup", "ip", node.Spec.NodeIP)
+		} else {
+			l.V(1).Info("removed endpoint from TalosCluster", "ip", node.Spec.NodeIP, "cluster", node.Spec.ClusterRef)
+		}
+		if err := r.refreshKubeconfig(ctx, node); err != nil {
+			l.Error(err, "could not refresh kubeconfig Secret server URL", "cluster", node.Spec.ClusterRef)
+		} else {
+			l.V(1).Info("kubeconfig Secret updated to surviving endpoint", "cluster", node.Spec.ClusterRef)
+		}
+	}
+
 	node.Finalizers = talos.RemoveFinalizer(node.Finalizers, talos.FinalizerCleanup)
 	if err := r.Update(ctx, node); err != nil {
 		return ctrl.Result{}, err
 	}
 	log.FromContext(ctx).Info("Node cleaned up", "name", node.Name)
 	return ctrl.Result{}, nil
+}
+
+// handleStandaloneReset performs a one-shot reset triggered by the
+// talos.yuriykovalchuk.dev/reset=true annotation. It removes the annotation BEFORE
+// calling Reset so a controller crash mid-reset cannot loop. On success it clears
+// the ConfigApplied condition so the next reconcile re-applies the machine config
+// (the node reboots into maintenance mode and needs a fresh config apply).
+func (r *TalosNodeReconciler) handleStandaloneReset(ctx context.Context, node *v1alpha1.TalosNode) (ctrl.Result, error) {
+	l := log.FromContext(ctx)
+
+	// Remove the annotation first — prevents retry loops on crash.
+	// Snapshot the node state as the patch base (TalosNode has no generated DeepCopy,
+	// so copy the struct and duplicate the annotations map manually).
+	base := &v1alpha1.TalosNode{}
+	*base = *node
+	oldAnnotations := make(map[string]string, len(node.Annotations))
+	for k, v := range node.Annotations {
+		oldAnnotations[k] = v
+	}
+	base.Annotations = oldAnnotations
+	patch := client.MergeFrom(base)
+	delete(node.Annotations, talos.AnnotationReset)
+	if err := r.Patch(ctx, node, patch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("remove reset annotation: %w", err)
+	}
+
+	emitEvent(r.Recorder, node, corev1.EventTypeNormal, "NodeResetTriggered", "Node reset triggered via annotation")
+	l.Info("reset triggered via annotation", "ip", node.Spec.NodeIP)
+
+	if err := r.tryReset(ctx, node); err != nil {
+		l.Error(err, "node reset failed", "ip", node.Spec.NodeIP)
+		emitEvent(r.Recorder, node, corev1.EventTypeWarning, "NodeResetFailed", err.Error())
+		return ctrl.Result{}, nil
+	}
+
+	l.Info("node reset, config will be re-applied on next reconcile", "ip", node.Spec.NodeIP)
+	emitEvent(r.Recorder, node, corev1.EventTypeNormal, "NodeResetComplete", "Node reset successfully; config will be re-applied on next reconcile")
+
+	// Clear ConfigApplied so isNodeUpToDate returns false and applyConfig runs again.
+	// firstApply will be true (maintenance mode) → DialInsecure is used.
+	talos.SetConditionStatus(&node.Status.Conditions,
+		v1alpha1.TalosNodeConditionConfigApplied, metav1.ConditionFalse, "Reset", "Node was reset; waiting for config re-apply")
+	fromPhase := node.Status.Phase
+	node.Status.Phase = v1alpha1.TalosNodePhasePending
+	appmetrics.RecordNodePhase(node.Name, node.Namespace, node.Spec.ClusterRef, string(node.Spec.Role), node.Spec.NodeIP, string(fromPhase), string(v1alpha1.TalosNodePhasePending))
+	if err := r.Status().Update(ctx, node); err != nil {
+		l.Error(err, "update status after reset")
+	}
+	return ctrl.Result{}, nil
+}
+
+// tryReset dials the node via mTLS and issues a reset (wipe + reboot to maintenance mode).
+func (r *TalosNodeReconciler) tryReset(ctx context.Context, node *v1alpha1.TalosNode) error {
+	talosconfig, _, skip, err := r.loadTalosconfig(ctx, node)
+	if err != nil {
+		return fmt.Errorf("load talosconfig: %w", err)
+	}
+	if skip {
+		return fmt.Errorf("talosconfig or cluster not found")
+	}
+
+	conn, err := r.Talos.Dial(ctx, talosconfig, node.Spec.NodeIP)
+	if err != nil {
+		return fmt.Errorf("dial node: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
+
+	return conn.Reset(ctx, node.Spec.NodeIP)
 }
 
 // handleEtcdLeave manages etcd membership removal for a departing ControlPlane node.
@@ -319,6 +470,125 @@ func survivingPeers(endpoints []string, excludeIP string) []string {
 		}
 	}
 	return peers
+}
+
+// removeEndpointFromCluster removes nodeIP from TalosCluster.spec.endpoints.
+// Called after a ControlPlane node is fully removed so the dead IP does not
+// linger in the cluster manifest or in configs generated for future nodes.
+// Best-effort: the caller logs and proceeds on error so deletion is never blocked.
+func (r *TalosNodeReconciler) removeEndpointFromCluster(ctx context.Context, node *v1alpha1.TalosNode) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cluster := &v1alpha1.TalosCluster{}
+		if err := r.Get(ctx, types.NamespacedName{Name: node.Spec.ClusterRef, Namespace: node.Namespace}, cluster); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil // cluster already gone — nothing to do
+			}
+			return err
+		}
+
+		var updated []string
+		for _, ep := range cluster.Spec.Endpoints {
+			if ep != node.Spec.NodeIP {
+				updated = append(updated, ep)
+			}
+		}
+
+		if len(updated) == len(cluster.Spec.Endpoints) {
+			return nil // IP was not in the list
+		}
+
+		cluster.Spec.Endpoints = updated
+		return r.Update(ctx, cluster)
+	})
+}
+
+// isLastControlPlane returns true when node is the only active (non-terminating)
+// ControlPlane TalosNode for its cluster. Used to block accidental last-CP deletion.
+//
+// Returns false immediately when the TalosCluster no longer exists: the guard
+// protects etcd quorum, but if the cluster object is already gone there is no
+// quorum left to protect. Allowing deletion in this case unblocks the recovery
+// path when a user accidentally deleted the TalosCluster before its nodes.
+func (r *TalosNodeReconciler) isLastControlPlane(ctx context.Context, node *v1alpha1.TalosNode) (bool, error) {
+	cluster := &v1alpha1.TalosCluster{}
+	if err := r.Get(ctx, types.NamespacedName{Name: node.Spec.ClusterRef, Namespace: node.Namespace}, cluster); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil // cluster gone — guard has nothing to protect
+		}
+		return false, fmt.Errorf("get cluster: %w", err)
+	}
+
+	var list v1alpha1.TalosNodeList
+	if err := r.List(ctx, &list, client.InNamespace(node.Namespace)); err != nil {
+		return false, fmt.Errorf("list TalosNodes: %w", err)
+	}
+	for _, n := range list.Items {
+		if n.Name == node.Name {
+			continue
+		}
+		if n.Spec.ClusterRef != node.Spec.ClusterRef {
+			continue
+		}
+		if n.Spec.Role != v1alpha1.TalosNodeRoleControlPlane {
+			continue
+		}
+		if n.DeletionTimestamp != nil {
+			continue // peer is also being deleted — does not count
+		}
+		return false, nil // found a surviving CP
+	}
+	return true, nil
+}
+
+// refreshKubeconfig reads the cluster's kubeconfig Secret and rewrites the server
+// URL to point to the first surviving control-plane endpoint.
+//
+// Called after a CP node is deleted. The credentials in the kubeconfig (CA, client
+// cert/key) are cluster-wide and remain valid; only the server address needs to
+// change if the deleted node was the endpoint the kubeconfig was pointing at.
+//
+// Best-effort: the caller logs and proceeds on error.
+func (r *TalosNodeReconciler) refreshKubeconfig(ctx context.Context, node *v1alpha1.TalosNode) error {
+	// Re-read the cluster to pick up the endpoint list AFTER removeEndpointFromCluster.
+	cluster := &v1alpha1.TalosCluster{}
+	if err := r.Get(ctx, types.NamespacedName{Name: node.Spec.ClusterRef, Namespace: node.Namespace}, cluster); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if len(cluster.Spec.Endpoints) == 0 {
+		return nil
+	}
+
+	kubeconfigSecret, err := getSecret(ctx, r.Client, clusterKubeconfigName(node.Spec.ClusterRef), node.Namespace)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // bootstrap never completed — nothing to update
+		}
+		return err
+	}
+
+	updated, err := updateKubeconfigServer(kubeconfigSecret.Data["kubeconfig"], cluster.Spec.Endpoints[0])
+	if err != nil {
+		return fmt.Errorf("rewrite kubeconfig server: %w", err)
+	}
+
+	kubeconfigSecret.Data["kubeconfig"] = updated
+	return r.Update(ctx, kubeconfigSecret)
+}
+
+// updateKubeconfigServer parses a kubeconfig, sets every cluster's server URL to
+// https://<endpoint>:6443, and re-serialises it.
+func updateKubeconfigServer(kubeconfigBytes []byte, endpoint string) ([]byte, error) {
+	cfg, err := clientcmd.Load(kubeconfigBytes)
+	if err != nil {
+		return nil, fmt.Errorf("load kubeconfig: %w", err)
+	}
+	for _, c := range cfg.Clusters {
+		c.Server = "https://" + endpoint + ":6443"
+	}
+	return clientcmd.Write(*cfg)
 }
 
 func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.TalosNode) error {
@@ -477,6 +747,12 @@ func mergePatches(base, patch map[string]interface{}) map[string]interface{} {
 func (r *TalosNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.TalosNode{}).
-		WithEventFilter(predicate.GenerationChangedPredicate{}).
+		// Reconcile on spec changes (generation bump) AND on annotation changes so
+		// that the talos.yuriykovalchuk.dev/reset=true annotation triggers a reconcile
+		// immediately without waiting for the next drift-check requeue.
+		WithEventFilter(predicate.Or[client.Object](
+			predicate.GenerationChangedPredicate{},
+			predicate.AnnotationChangedPredicate{},
+		)).
 		Complete(r)
 }

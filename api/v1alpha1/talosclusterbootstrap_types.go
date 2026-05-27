@@ -12,6 +12,7 @@ const (
 	TalosClusterBootstrapPhaseWaitingForNodes      TalosClusterBootstrapPhase = "WaitingForNodes"
 	TalosClusterBootstrapPhaseBootstrapping        TalosClusterBootstrapPhase = "Bootstrapping"
 	TalosClusterBootstrapPhaseWaitingForKubeconfig TalosClusterBootstrapPhase = "WaitingForKubeconfig"
+	TalosClusterBootstrapPhaseWaitingForAPIServer  TalosClusterBootstrapPhase = "WaitingForAPIServer"
 	TalosClusterBootstrapPhaseCompleted            TalosClusterBootstrapPhase = "Completed"
 	TalosClusterBootstrapPhaseError                TalosClusterBootstrapPhase = "Error"
 )
@@ -20,6 +21,7 @@ const (
 const (
 	TalosClusterBootstrapConditionBootstrapped = "Bootstrapped"
 	TalosClusterBootstrapConditionKubeconfig   = "KubeconfigAvailable"
+	TalosClusterBootstrapConditionAPIServer    = "APIServerReady"
 )
 
 type TalosClusterBootstrapSpec struct {

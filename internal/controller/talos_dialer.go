@@ -19,8 +19,11 @@ type TalosConnection interface {
 	Bootstrap(ctx context.Context, endpoint string) error
 	GetKubeconfig(ctx context.Context, endpoint string) ([]byte, error)
 	GetMachineConfig(ctx context.Context, nodeIP string) ([]byte, error)
+	GetHostname(ctx context.Context, nodeIP string) (string, error)
 	EtcdLeave(ctx context.Context, nodeIP string) error
 	EtcdForceRemove(ctx context.Context, survivorIP, deadNodeIP string) error
+	// Reset wipes the node's ephemeral state and reboots it into maintenance mode.
+	Reset(ctx context.Context, nodeIP string) error
 	Close() error
 }
 
@@ -63,12 +66,20 @@ func (r *realConnection) GetMachineConfig(ctx context.Context, nodeIP string) ([
 	return talos.GetMachineConfig(ctx, r.c, nodeIP)
 }
 
+func (r *realConnection) GetHostname(ctx context.Context, nodeIP string) (string, error) {
+	return talos.GetHostname(ctx, r.c, nodeIP)
+}
+
 func (r *realConnection) EtcdLeave(ctx context.Context, nodeIP string) error {
 	return talos.EtcdLeave(ctx, r.c, nodeIP)
 }
 
 func (r *realConnection) EtcdForceRemove(ctx context.Context, survivorIP, deadNodeIP string) error {
 	return talos.EtcdForceRemoveByIP(ctx, r.c, survivorIP, deadNodeIP)
+}
+
+func (r *realConnection) Reset(ctx context.Context, nodeIP string) error {
+	return talos.ResetNode(ctx, r.c, nodeIP)
 }
 
 func (r *realConnection) Close() error {

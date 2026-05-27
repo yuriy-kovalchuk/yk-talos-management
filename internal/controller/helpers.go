@@ -3,7 +3,9 @@ package controller
 import (
 	"context"
 
+	"github.com/yuriy-kovalchuk/yk-talos-management/api/v1alpha1"
 	appmetrics "github.com/yuriy-kovalchuk/yk-talos-management/internal/metrics"
+	"github.com/yuriy-kovalchuk/yk-talos-management/internal/talos"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -50,6 +52,24 @@ func resultLabel(err error) string {
 		return "error"
 	}
 	return "success"
+}
+
+// skipDrain returns true when node drain should be bypassed. Drain is skipped
+// when spec.skipDrain is true OR when the escape-hatch annotation is present.
+// The annotation is checked second so it can override a missing spec field on a
+// terminating object without requiring a spec patch.
+func skipDrain(node *v1alpha1.TalosNode) bool {
+	return node.Spec.SkipDrain ||
+		node.Annotations[talos.AnnotationSkipDrain] == "true"
+}
+
+// drainSkipReason returns a short human-readable string describing why drain
+// is being skipped — used in log messages.
+func drainSkipReason(node *v1alpha1.TalosNode) string {
+	if node.Annotations[talos.AnnotationSkipDrain] == "true" {
+		return "annotation " + talos.AnnotationSkipDrain
+	}
+	return "spec.skipDrain"
 }
 
 // newSecret builds a bare Opaque Secret with a single data key.

@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -36,11 +37,18 @@ import (
 // nodeReadyDelay is how long to wait before re-checking whether a ControlPlane node is Ready.
 const nodeReadyDelay = 10 * time.Second
 
+// apiServerCheckDelay is how long to wait between Kubernetes API server reachability probes.
+// The API server typically starts several seconds after Bootstrap() accepts the request.
+const apiServerCheckDelay = 15 * time.Second
+
 type TalosClusterBootstrapReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Talos    TalosDialer
-	Recorder record.EventRecorder
+	Scheme          *runtime.Scheme
+	Talos           TalosDialer
+	Recorder        record.EventRecorder
+	// NewRemoteClient builds a Kubernetes client from admin kubeconfig bytes.
+	// Injected in tests; production falls back to newRemoteClient (in talosnode_drain.go).
+	NewRemoteClient func(kubeconfig []byte) (kubernetes.Interface, error)
 }
 
 func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -88,6 +96,14 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 		return r.setError(ctx, &bootstrap, err)
 	} else if !ready {
 		return result, nil
+	}
+
+	// Short-circuit: kubeconfig is already saved — skip re-dialing Talos and go
+	// straight to the API server readiness probe. This is the re-entry path from
+	// WaitingForAPIServer as well as any other requeue after kubeconfig is stored.
+	if talos.HasCondition(bootstrap.Status.Conditions,
+		v1alpha1.TalosClusterBootstrapConditionKubeconfig, metav1.ConditionTrue) {
+		return r.waitForAPIServer(ctx, &bootstrap, cluster)
 	}
 
 	// Capture state before any mutations so idempotency checks reflect the
@@ -177,20 +193,75 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 		return r.setError(ctx, &bootstrap, fmt.Errorf("save kubeconfig: %w", err))
 	}
 
-	appmetrics.RecordBootstrapPhase(bootstrap.Spec.ClusterRef, bootstrap.Namespace, string(bootstrap.Status.Phase), string(v1alpha1.TalosClusterBootstrapPhaseCompleted))
-	bootstrap.Status.Phase = v1alpha1.TalosClusterBootstrapPhaseCompleted
-	bootstrap.Status.Message = "Bootstrap completed"
+	// Persist KubeconfigAvailable=True so the short-circuit path picks it up on
+	// any subsequent requeue (WaitingForAPIServer, controller restart, etc.).
 	talos.SetConditionStatus(&bootstrap.Status.Conditions,
 		v1alpha1.TalosClusterBootstrapConditionKubeconfig, metav1.ConditionTrue,
 		"Retrieved", "Kubeconfig retrieved")
 	if err := r.Status().Update(ctx, &bootstrap); err != nil {
-		return ctrl.Result{}, fmt.Errorf("update final status: %w", err)
+		return ctrl.Result{}, fmt.Errorf("update kubeconfig status: %w", err)
 	}
 
-	appmetrics.BootstrapDuration.WithLabelValues(bootstrap.Spec.ClusterRef).Observe(time.Since(bootstrap.CreationTimestamp.Time).Seconds())
-	emitEvent(r.Recorder, &bootstrap, corev1.EventTypeNormal, "Completed", "Bootstrap complete; kubeconfig stored")
-	l.Info("Bootstrap complete", "endpoint", dialedTo)
+	return r.waitForAPIServer(ctx, &bootstrap, cluster)
+}
+
+// waitForAPIServer loads the saved kubeconfig and probes the Kubernetes API server.
+// Returns Completed when reachable, or requeues with WaitingForAPIServer until it is.
+// This separates the "kubeconfig bytes exist" signal from "cluster is actually usable".
+func (r *TalosClusterBootstrapReconciler) waitForAPIServer(ctx context.Context, bootstrap *v1alpha1.TalosClusterBootstrap, cluster *v1alpha1.TalosCluster) (ctrl.Result, error) {
+	l := log.FromContext(ctx)
+
+	kubeconfigSecret, err := getSecret(ctx, r.Client, clusterKubeconfigName(cluster.Name), cluster.Namespace)
+	if err != nil {
+		return r.setError(ctx, bootstrap, fmt.Errorf("load kubeconfig secret: %w", err))
+	}
+
+	apiClient, apiErr := r.buildRemoteAPIClient(kubeconfigSecret.Data["kubeconfig"])
+	if apiErr == nil {
+		_, apiErr = apiClient.Discovery().ServerVersion()
+	}
+	if apiErr != nil {
+		l.Info("kubernetes API server not yet reachable, will retry",
+			"requeueAfter", apiServerCheckDelay, "err", apiErr)
+		appmetrics.RecordBootstrapPhase(bootstrap.Spec.ClusterRef, bootstrap.Namespace,
+			string(bootstrap.Status.Phase), string(v1alpha1.TalosClusterBootstrapPhaseWaitingForAPIServer))
+		bootstrap.Status.Phase = v1alpha1.TalosClusterBootstrapPhaseWaitingForAPIServer
+		bootstrap.Status.Message = "Waiting for Kubernetes API server to become reachable"
+		talos.SetConditionStatus(&bootstrap.Status.Conditions,
+			v1alpha1.TalosClusterBootstrapConditionAPIServer, metav1.ConditionFalse,
+			"NotReady", fmt.Sprintf("API server unreachable: %v", apiErr))
+		if updateErr := r.Status().Update(ctx, bootstrap); updateErr != nil {
+			l.Error(updateErr, "update api server wait status")
+		}
+		return ctrl.Result{RequeueAfter: apiServerCheckDelay}, nil
+	}
+
+	appmetrics.RecordBootstrapPhase(bootstrap.Spec.ClusterRef, bootstrap.Namespace,
+		string(bootstrap.Status.Phase), string(v1alpha1.TalosClusterBootstrapPhaseCompleted))
+	bootstrap.Status.Phase = v1alpha1.TalosClusterBootstrapPhaseCompleted
+	bootstrap.Status.Message = "Bootstrap completed"
+	talos.SetConditionStatus(&bootstrap.Status.Conditions,
+		v1alpha1.TalosClusterBootstrapConditionAPIServer, metav1.ConditionTrue,
+		"Ready", "Kubernetes API server is reachable")
+	if err := r.Status().Update(ctx, bootstrap); err != nil {
+		return ctrl.Result{}, fmt.Errorf("update completed status: %w", err)
+	}
+
+	appmetrics.BootstrapDuration.WithLabelValues(bootstrap.Spec.ClusterRef).Observe(
+		time.Since(bootstrap.CreationTimestamp.Time).Seconds())
+	emitEvent(r.Recorder, bootstrap, corev1.EventTypeNormal, "Completed",
+		"Bootstrap complete; kubeconfig stored and API server reachable")
+	l.Info("Bootstrap complete")
 	return ctrl.Result{}, nil
+}
+
+// buildRemoteAPIClient creates a Kubernetes client from kubeconfig bytes.
+// Uses r.NewRemoteClient when set (tests), otherwise falls back to newRemoteClient.
+func (r *TalosClusterBootstrapReconciler) buildRemoteAPIClient(kubeconfig []byte) (kubernetes.Interface, error) {
+	if r.NewRemoteClient != nil {
+		return r.NewRemoteClient(kubeconfig)
+	}
+	return newRemoteClient(kubeconfig)
 }
 
 // waitForReadyNodes checks whether at least one ControlPlane node for this bootstrap's

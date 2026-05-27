@@ -15,17 +15,21 @@ End-to-end guide for running the operator against real ephemeral Talos nodes on 
 │  ┌──────────────────────┐  ┌─────────────────┐ │
 │  │  kind network        │  │  talos-test net │ │
 │  │                      │  │                 │ │
-│  │  [kind-control-plane]│  │                 │ │
-│  │  [operator pod]      │  │                 │ │
-│  │                      │  │                 │ │
-│  │  [test-cp1] ◄────────┼──┼── also here     │ │
-│  └──────────────────────┘  └─────────────────┘ │
+│  │  [kind-control-plane]│  │  [test-cp1] ◄───┼─┤
+│  │  [operator pod]      │  │  [test-cp2]     │ │
+│  │         │            │  │  [test-w1]      │ │
+│  │         ▼            │  └─────────────────┘ │
+│  │  [test-cp1] ◄────────┘                      │
+│  └──────────────────────┘                      │
 └─────────────────────────────────────────────────┘
 ```
 
 - The **kind cluster** (`talos-kind-dev`) is the management cluster where the operator and CRDs live.
 - **Talos nodes** are ephemeral Docker containers that start in maintenance mode (no config, Talos API on port 50000).
-- Each Talos container is connected to **both** the `talos-test` network (isolation) and the `kind` network (reachability). Use the `kind` network IPs in your manifests so the operator pod can dial the nodes.
+- Each Talos container is connected to **both** the `kind` network and the `talos-test` network:
+  - **`kind` network** — makes nodes reachable from the operator pod. The IP on this network is what you put in `spec.nodeIP`; the operator dials it for all Talos API calls (config apply, drift detection, hostname resolution, etcd leave).
+  - **`talos-test` network** — dedicated to Talos-to-Talos traffic (etcd peer URLs, Kubernetes API server). Also used by `make talos-clean` to identify which containers belong to this test setup.
+- Node drain uses the **hostname** (not the IP) to find the k8s Node object, so there is no constraint on which network interface the kubelet picks as its primary address.
 - The operator runs as a pod inside kind, built and loaded locally via `make kind-deploy`.
 
 ---
@@ -50,7 +54,7 @@ End-to-end guide for running the operator against real ephemeral Talos nodes on 
 make kind-deploy
 ```
 
-Creates the kind cluster (if not already running), builds the operator image, loads it into kind, and deploys all CRDs, RBAC, and the operator Deployment. The operator runs with debug log level (`--zap-log-level=1`).
+Creates the kind cluster (if not already running), builds the operator image, loads it into kind, deploys all CRDs, RBAC, and the operator Deployment, and deploys the `tools` pod. The operator runs with debug log level (`--zap-log-level=1`).
 
 ### 2. Start Talos nodes in Docker
 
@@ -116,14 +120,106 @@ kubectl --context kind-talos-kind-dev apply -f your-manifests.yaml
 
 The operator will begin reconciling immediately.
 
-### 4. Retrieve the kubeconfig (after bootstrap completes)
+### 4. Access the managed cluster
+
+The `tools` pod is deployed automatically as part of `make kind-deploy`. It contains both `kubectl` (for the managed Kubernetes cluster) and `talosctl` (for the Talos API). Both tools can reach node IPs directly because the pod shares the Docker `kind` network with the Talos containers.
+
+#### Inject credentials (after bootstrap completes)
+
+Wait for the bootstrap to reach `Completed` phase — this now means both the kubeconfig is stored **and** the Kubernetes API server is reachable:
 
 ```bash
-kubectl get secret test-kubeconfig \
-  -o jsonpath='{.data.kubeconfig}' | base64 -d > /tmp/test-kubeconfig
-
-kubectl --kubeconfig=/tmp/test-kubeconfig get nodes
+kubectl --context kind-talos-kind-dev get talosclusterbootstrap test -w
+# Phase transitions: Pending → WaitingForNodes → Bootstrapping → WaitingForAPIServer → Completed
 ```
+
+Then inject credentials:
+
+```bash
+make tools-inject CLUSTER=test
+```
+
+This injects both kubeconfig and talosconfig in one shot. Override `CLUSTER_NS` if your TalosCluster lives in a non-default namespace:
+
+```bash
+make tools-inject CLUSTER=test CLUSTER_NS=default
+```
+
+After deleting a control plane node the operator automatically updates the `test-kubeconfig` Secret to point to a surviving endpoint. Re-run `tools-inject` to pull the updated config into the pod.
+
+#### Open a shell
+
+```bash
+make tools-shell
+```
+
+Inside the shell both tools are available immediately:
+
+```bash
+# Kubernetes
+kubectl get nodes
+kubectl get pods -A
+
+# Talos
+talosctl --nodes 172.22.0.3 version
+talosctl --nodes 172.22.0.3 health
+talosctl --nodes 172.22.0.3 logs
+```
+
+#### Quick one-liner (no interactive shell needed)
+
+```bash
+kubectl --context kind-talos-kind-dev exec -it tools \
+  -n yk-talos-management-system -- kubectl get nodes
+```
+
+> **Note:** both configs are stored in the container's filesystem and are lost on pod restart. Re-run `make tools-inject` after any restart.
+
+### 5. Deleting a node
+
+Delete the `TalosNode` object. The operator drains workloads, removes the node
+from etcd (control plane only), and cleans up the config Secret automatically:
+
+```bash
+kubectl --context kind-talos-kind-dev delete talosnode my-cluster-cp-3
+```
+
+Watch it progress through `Deleting` and disappear:
+
+```bash
+kubectl --context kind-talos-kind-dev get talosnode my-cluster-cp-3 -w
+```
+
+If drain gets stuck (or you just want fast removal in a test environment):
+
+```bash
+kubectl --context kind-talos-kind-dev annotate talosnode my-cluster-cp-3 \
+  talos.yuriykovalchuk.dev/skip-drain=true
+```
+
+#### Verifying etcd cleanup (ControlPlane nodes)
+
+After a CP deletion, confirm the etcd member was removed by querying a **surviving** node:
+
+```bash
+# inside the tools pod (make tools-shell)
+talosctl etcd members --nodes <surviving-cp-ip>
+```
+
+The deleted node should no longer appear. Do **not** use `talosctl get members` for this check — that command shows Talos cluster discovery members (a separate peer list with its own TTL) which will still include the deleted node until its Docker container is stopped.
+
+The Docker container itself is still running after the operator removes the TalosNode. Stop and remove it when you are done:
+
+```bash
+make talos-down TALOS_NODE_NAME=cp-3
+```
+
+> **Important — do not `docker start` a removed node.** The operator's deletion sequence does not touch the Docker container or its volumes. The `/system/state` mount is a **named Docker volume** that persists across container restarts — it holds the machine config, etcd data, and node identity. If you restart the container after the TalosNode CR has been deleted, Talos finds its old config on the volume and the node rejoins the cluster as if nothing happened. Always use `make talos-down` to remove the container before attempting to reuse the slot, or run `make talos-up` to get a clean container with empty volumes.
+>
+> **`spec.resetOnDelete` and the `talos.yuriykovalchuk.dev/reset` annotation are no-ops in Docker.** Talos detects `PLATFORM=container` and its reset sequence in that mode is only: stop services → shut down. The partition-wipe step is skipped entirely because Docker containers have no block-device partitions. The call succeeds (the container shuts down), but no data is erased. On bare metal and VMs, Talos formats the STATE and EPHEMERAL disk partitions and the node genuinely comes back in maintenance mode. Use `make talos-down` + `make talos-up` to get the equivalent result locally.
+
+See [docs/node-removal.md](node-removal.md) for the full sequence, edge cases,
+and all available options.
 
 ---
 
@@ -175,8 +271,11 @@ The Grafana dashboard (`config/manager/grafana-dashboard.yaml`) is loaded automa
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TALOS_VERSION` | `v1.13.0` | Talos image tag — must match `go.mod` machinery version |
-| `TALOS_DOCKER_NETWORK` | `talos-test` | Dedicated Docker network for isolation |
+| `TALOS_DOCKER_NETWORK` | `talos-test` | Docker network for Talos inter-node traffic and container grouping |
 | `TALOS_NODE_NAME` | `cp1` | Node container name |
 | `KIND_CLUSTER` | `talos-kind-dev` | Kind cluster name (also sets kubectl context) |
+| `CLUSTER` | `my-cluster` | TalosCluster name for `tools-inject` |
+| `CLUSTER_NS` | `default` | Namespace of the TalosCluster (where the kubeconfig/talosconfig Secrets live) |
+| `KUBECTL_SHELL_VERSION` | `v1.32.0` | kubectl version baked into the tools image |
 
 

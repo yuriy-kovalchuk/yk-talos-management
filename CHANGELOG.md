@@ -7,6 +7,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version
 
 ## [Unreleased]
 
+### Added
+- **Node drain on deletion**: when a `TalosNode` is deleted the operator cordons the node, evicts all pods, and removes the Kubernetes `Node` object before proceeding with etcd leave and Secret cleanup. Controlled by `spec.skipDrain` (default `false`) and `spec.drainTimeout` (default `5m`).
+- **Hostname resolution for drain**: the operator dials the Talos API and reads the node hostname via the COSI `HostnameStatus` resource before cordoning. This ensures the correct Kubernetes `Node` object is found regardless of which network interface kubelet registered with.
+- **`spec.resetOnDelete`**: when `true`, the operator wipes the node's ephemeral state and reboots it into maintenance mode after etcd leave and before Secret cleanup. Best-effort — failure is logged and emits an event but never blocks deletion. No-op on Docker/container nodes.
+- **Standalone reset annotation** (`talos.yuriykovalchuk.dev/reset=true`): triggers a one-shot wipe + reboot to maintenance mode without removing the node from the cluster inventory. The annotation is removed before the reset call to prevent retry loops. On success, `ConfigApplied` is cleared so the next reconcile re-applies the machine config.
+- **Skip-drain annotation** (`talos.yuriykovalchuk.dev/skip-drain=true`): escape hatch to bypass a stuck drain on an already-terminating `TalosNode` without modifying the spec. Useful when a PDB or unreachable node blocks eviction after `kubectl delete` has already been issued.
+- **`TalosNodePhaseDeleting`**: new phase set as soon as the deletion finalizer starts processing, visible via `kubectl get talosnode`.
+- **`TalosCluster` deletion guard**: the operator blocks `TalosCluster` deletion while any `TalosNode` objects still reference it, setting `Phase=Deleting` and requeuing every 30s. Prevents credentials being torn out from under running node finalizers.
+- **Last-CP guard fix**: when the `TalosCluster` object is already gone, the last-ControlPlane guard is bypassed so orphaned CP nodes can still be cleaned up.
+- **`TalosClusterBootstrap` API server readiness check**: `Phase=Completed` now requires the Kubernetes API server to respond to a `Discovery` probe in addition to the kubeconfig being stored. A new `WaitingForAPIServer` phase (with `APIServerReady` condition) is set while the probe retries every 15s.
+- **`talos_node_drain_total` metric**: Prometheus counter tracking drain operation outcomes (`success`, `skipped`, `timeout`) labelled by cluster.
+- **`tools` pod**: the local development pod now bundles both `kubectl` and `talosctl`; `make tools-inject` injects both kubeconfig and talosconfig in a single command; `make tools-shell` opens an interactive shell with both tools ready.
+
+### Fixed
+- `TalosCluster` deletion could silently orphan `TalosNode` objects and permanently block their own deletion via the last-CP guard — the deletion guard above resolves this.
+- Last-CP guard incorrectly blocked deletion when the `TalosCluster` was already gone, leaving CP nodes stuck with their finalizer forever.
+- `TalosClusterBootstrap` reported `Phase=Completed` before the Kubernetes API server was actually reachable, causing downstream tooling to fail immediately after bootstrap.
+
 ---
 
 ## [0.4.0-alpha] - 2026-05-10

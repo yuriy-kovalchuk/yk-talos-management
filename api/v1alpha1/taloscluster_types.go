@@ -12,6 +12,10 @@ const (
 	TalosPhaseProvisioning TalosPhase = "Provisioning"
 	TalosPhaseReady        TalosPhase = "Ready"
 	TalosPhaseError        TalosPhase = "Error"
+	// TalosPhaseDeleting is set when deletion is blocked waiting for TalosNode
+	// objects to be removed first. The finalizer holds the object alive until
+	// all nodes referencing this cluster have been deleted.
+	TalosPhaseDeleting TalosPhase = "Deleting"
 )
 
 // Condition type constants as plain strings — no type casting needed at call sites.

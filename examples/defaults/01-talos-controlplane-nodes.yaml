@@ -11,16 +11,14 @@ metadata:
 spec:
   clusterRef: my-cluster
   role: ControlPlane
-  nodeIP: 10.0.2.100
+  nodeIP: 172.22.0.3
   patches:
     - |
       machine:
-        install:
-          disk: /dev/sda
         network:
           hostname: cp-1
         nodeLabels:
-          topology.kubernetes.io/zone: us-east-1a
+          mysuperlabel: control-node-1
 ---
 apiVersion: talos.yuriykovalchuk.dev/v1alpha1
 kind: TalosNode
@@ -30,16 +28,14 @@ metadata:
 spec:
   clusterRef: my-cluster
   role: ControlPlane
-  nodeIP: 10.0.2.101
+  nodeIP: 172.22.0.4
   patches:
     - |
       machine:
-        install:
-          disk: /dev/sda
         network:
           hostname: cp-2
         nodeLabels:
-          topology.kubernetes.io/zone: us-east-1b
+          mysuperlabel: control-node-2
 ---
 apiVersion: talos.yuriykovalchuk.dev/v1alpha1
 kind: TalosNode
@@ -49,13 +45,11 @@ metadata:
 spec:
   clusterRef: my-cluster
   role: ControlPlane
-  nodeIP: 10.0.2.102
+  nodeIP: 172.22.0.5
   patches:
     - |
       machine:
-        install:
-          disk: /dev/sda
         network:
           hostname: cp-3
         nodeLabels:
-          topology.kubernetes.io/zone: us-east-1c
+          mysuperlabel: control-node-3

@@ -81,7 +81,30 @@ func (r *TalosClusterReconciler) handleDeletion(ctx context.Context, cluster *v1
 		return ctrl.Result{}, nil
 	}
 
-	log.FromContext(ctx).Info("Cleaning up cluster resources", "name", cluster.Name)
+	l := log.FromContext(ctx)
+
+	// Block deletion while TalosNode objects still reference this cluster.
+	// Deleting the cluster first would yank the talosconfig and kubeconfig secrets
+	// out from under them, orphan their finalizers, and — for single-CP clusters —
+	// permanently block the TalosNode deletion (last-CP guard fires, no cluster
+	// to look up, node is stuck forever). Delete the nodes first.
+	count, err := r.activeNodeCount(ctx, cluster)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("count active nodes: %w", err)
+	}
+	if count > 0 {
+		l.Info("deletion blocked: TalosNode objects still reference this cluster; delete them first",
+			"name", cluster.Name, "activeNodes", count)
+		appmetrics.RecordClusterPhase(cluster.Name, cluster.Namespace,
+			string(cluster.Status.Phase), string(v1alpha1.TalosPhaseDeleting))
+		cluster.Status.Phase = v1alpha1.TalosPhaseDeleting
+		if updateErr := r.Status().Update(ctx, cluster); updateErr != nil {
+			l.Error(updateErr, "update deleting status")
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	l.Info("Cleaning up cluster resources", "name", cluster.Name)
 
 	sm := talos.NewSecretManager(r.Client, r.Scheme, cluster.Name, cluster.UID)
 	if err := sm.DeleteMultiple(ctx, cluster.Namespace,
@@ -95,6 +118,22 @@ func (r *TalosClusterReconciler) handleDeletion(ctx context.Context, cluster *v1
 
 	cluster.Finalizers = talos.RemoveFinalizer(cluster.Finalizers, talos.FinalizerCleanup)
 	return ctrl.Result{}, r.Update(ctx, cluster)
+}
+
+// activeNodeCount returns the number of TalosNode objects that reference this cluster
+// and have not yet been marked for deletion. Used to block premature cluster teardown.
+func (r *TalosClusterReconciler) activeNodeCount(ctx context.Context, cluster *v1alpha1.TalosCluster) (int, error) {
+	var nodes v1alpha1.TalosNodeList
+	if err := r.List(ctx, &nodes, client.InNamespace(cluster.Namespace)); err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, n := range nodes.Items {
+		if n.Spec.ClusterRef == cluster.Name && n.DeletionTimestamp == nil {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // isUpToDate returns true when the cluster is already fully provisioned and the spec hasn't changed.

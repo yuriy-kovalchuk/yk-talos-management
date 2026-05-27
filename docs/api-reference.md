@@ -95,6 +95,7 @@ _Appears in:_
 | `WaitingForNodes` |  |
 | `Bootstrapping` |  |
 | `WaitingForKubeconfig` |  |
+| `WaitingForAPIServer` |  |
 | `Completed` |  |
 | `Error` |  |
 
@@ -215,6 +216,7 @@ _Appears in:_
 | `Applying` |  |
 | `Ready` |  |
 | `Error` |  |
+| `Deleting` | TalosNodePhaseDeleting is set as soon as the deletion finalizer starts<br />processing — drain, etcd leave, and config cleanup. The phase persists<br />until the finalizer is removed and the object is gone.<br /> |
 
 
 #### TalosNodeRole
@@ -253,6 +255,9 @@ _Appears in:_
 | `patches` _string array_ | YAML patches applied on top of the base machine config.<br />Patches without an apiVersion key are deep-merged into the machine/cluster config.<br />Patches with apiVersion (e.g. RegistryMirrorConfig) are appended as separate YAML documents. |  |  |
 | `patchesFrom` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.3/#secretkeyselector-v1-core) array_ | Secret-backed patches applied after inline patches, so sensitive values<br />(credentials, keys) do not need to be inlined in the manifest.<br />Each entry references a key within a Kubernetes Secret in the same namespace. |  |  |
 | `driftDetection` _boolean_ | When true, the controller periodically fetches the running config from the node<br />and re-applies if it diverges from the desired state. Set to false for nodes<br />that are frequently offline (e.g. homelab nodes powered down overnight). | true |  |
+| `skipDrain` _boolean_ | When true, skip Kubernetes node drain (cordon + pod eviction) during node removal.<br />Use for nodes that are already unreachable or when fast removal is required. | false | Optional: \{\} <br /> |
+| `drainTimeout` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.3/#duration-v1-meta)_ | Maximum time to wait for all pods to be evicted during node drain.<br />Defaults to 5 minutes. |  | Optional: \{\} <br /> |
+| `resetOnDelete` _boolean_ | When true, the operator wipes the node's ephemeral state and reboots it into<br />maintenance mode as part of the deletion sequence (after etcd leave, before the<br />config secret is removed). Useful when the node hardware will be repurposed —<br />the next TalosNode pointing at the same IP will apply a fresh config.<br />Best-effort: a reset failure is logged and emits an event but never blocks deletion. | false | Optional: \{\} <br /> |
 
 
 #### TalosNodeStatus
@@ -294,5 +299,6 @@ _Appears in:_
 | `Provisioning` |  |
 | `Ready` |  |
 | `Error` |  |
+| `Deleting` | TalosPhaseDeleting is set when deletion is blocked waiting for TalosNode<br />objects to be removed first. The finalizer holds the object alive until<br />all nodes referencing this cluster have been deleted.<br /> |
 
 

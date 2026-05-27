@@ -2,6 +2,7 @@
         kind-up kind-down kind-deploy kind-install-crds kind-load \
         monitoring-up monitoring-down \
         talos-up talos-down talos-ips talos-clean \
+        tools-deploy tools-inject tools-shell \
         controller-gen crd-ref-docs api-docs \
         docker-build docker-build-local docker-push buildx-setup \
         install-hooks deps-check \
@@ -188,7 +189,7 @@ talos-up:
 talos-down:
 	$(TALOS_ENV) $(TALOS_NODES_SCRIPT) down
 
-## talos-ips: print IP addresses of running Talos nodes on the kind network
+## talos-ips: print kind-network IPs of running Talos nodes (use these in spec.nodeIP)
 talos-ips:
 	$(TALOS_ENV) $(TALOS_NODES_SCRIPT) ips
 
@@ -197,6 +198,57 @@ talos-clean:
 	@docker ps -aq --filter network=$(TALOS_DOCKER_NETWORK) | xargs docker rm -f 2>/dev/null || true
 	@docker network rm $(TALOS_DOCKER_NETWORK) 2>/dev/null || true
 	@echo "All containers on network '$(TALOS_DOCKER_NETWORK)' removed."
+
+# ── tools pod (managed cluster access) ───────────────────────────────────────
+# A pod deployed inside kind containing both kubectl and talosctl.
+# Kind pods share the Docker "kind" network with the Talos containers, so both
+# kubeconfig and talosconfig server URLs are reachable directly.
+
+# Name of the TalosCluster whose credentials to inject (override on the command line).
+CLUSTER    ?= my-cluster
+# Namespace where the TalosCluster (and its credential Secrets) live.
+CLUSTER_NS ?= default
+
+# kubectl version baked into the tools image.
+KUBECTL_SHELL_VERSION ?= v1.32.0
+TOOLS_IMAGE           := tools:local
+
+## tools-deploy: build the kubectl+talosctl image and load it into kind
+tools-deploy:
+	docker build \
+	  --build-arg KUBECTL_VERSION=$(KUBECTL_SHELL_VERSION) \
+	  --build-arg TALOS_VERSION=$(TALOS_VERSION) \
+	  -t $(TOOLS_IMAGE) \
+	  -f hack/Dockerfile.tools \
+	  hack/
+	kind load docker-image $(TOOLS_IMAGE) --name $(KIND_CLUSTER)
+
+## tools-inject: inject kubeconfig and talosconfig for CLUSTER into the tools pod
+##   Usage: make tools-inject CLUSTER=my-cluster [CLUSTER_NS=default]
+tools-inject:
+	@echo "Waiting for tools pod to be ready..."
+	@kubectl --context kind-$(KIND_CLUSTER) wait pod/tools \
+	  -n yk-talos-management-system --for=condition=Ready --timeout=60s
+	@kubectl --context kind-$(KIND_CLUSTER) get secret $(CLUSTER)-kubeconfig \
+	  -n $(CLUSTER_NS) -o jsonpath='{.data.kubeconfig}' \
+	  | base64 -d \
+	  | kubectl --context kind-$(KIND_CLUSTER) exec -i tools \
+	    -n yk-talos-management-system \
+	    -- sh -c 'mkdir -p $$HOME/.kube && cat > $$HOME/.kube/config'
+	@echo "✓ kubeconfig loaded"
+	@kubectl --context kind-$(KIND_CLUSTER) get secret $(CLUSTER)-talosconfig \
+	  -n $(CLUSTER_NS) -o jsonpath='{.data.talosconfig}' \
+	  | base64 -d \
+	  | kubectl --context kind-$(KIND_CLUSTER) exec -i tools \
+	    -n yk-talos-management-system \
+	    -- sh -c 'mkdir -p $$HOME/.talos && cat > $$HOME/.talos/config'
+	@echo "✓ talosconfig loaded"
+	@echo "  Open shell : make tools-shell"
+
+## tools-shell: open an interactive shell inside the tools pod (kubectl + talosctl available)
+tools-shell:
+	kubectl --context kind-$(KIND_CLUSTER) exec -it tools \
+	  -n yk-talos-management-system -- sh
 
 # ── Kind cluster ──────────────────────────────────────────────────────────────
 
@@ -219,11 +271,14 @@ kind-load: docker-build-local
 	kind load docker-image $(IMAGE):latest --name $(KIND_CLUSTER)
 	@echo "Loaded $(IMAGE):latest into kind cluster '$(KIND_CLUSTER)'"
 
-## kind-deploy: create cluster, build+load image, apply manifests, restart operator pod
-kind-deploy: manifests kind-up kind-load
+## kind-deploy: create cluster, build+load image, apply manifests, restart operator pod, deploy tools pod
+kind-deploy: manifests kind-up kind-load tools-deploy
 	kubectl --context kind-$(KIND_CLUSTER) apply -k config/default/
 	kubectl --context kind-$(KIND_CLUSTER) rollout restart deployment/yk-talos-management \
 	  -n yk-talos-management-system
+	kubectl --context kind-$(KIND_CLUSTER) delete pod tools \
+	  -n yk-talos-management-system --ignore-not-found
+	kubectl --context kind-$(KIND_CLUSTER) apply -f hack/tools-pod.yaml
 
 # ── Monitoring (local kind) ───────────────────────────────────────────────────
 

@@ -18,8 +18,8 @@ spec:
   # (https://<endpoint>:6443); all are embedded in the talosconfig so any node
   # can be reached for Talos API calls and kubeconfig retrieval.
   endpoints:
-    - 10.0.2.100
-    - 10.0.2.101
-    - 10.0.2.102
+    - 172.22.0.3
+    - 172.22.0.4
+    - 172.22.0.5
   # Must match the Talos release deployed on your nodes.
   talosVersion: v1.13
