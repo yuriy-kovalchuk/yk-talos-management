@@ -52,7 +52,6 @@ type TalosClusterStatus struct {
 // +kubebuilder:printcolumn:name=Phase,type=string,JSONPath=.status.phase
 // +kubebuilder:resource:scope=Namespaced,path=talosclusters,shortName=taloscluster
 // +kubebuilder:storageversion
-// +kubebuilder:webhooks:verbs=create;update,path=/validate-talos-yuriykovalchuk-dev-v1alpha1-taloscluster,validatingWebhookGeneratorStrategy=webhook-client
 
 // TalosCluster generates and stores the secrets bundle, machine configs, and talosconfig for a Talos Linux cluster.
 type TalosCluster struct {

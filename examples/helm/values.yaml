@@ -5,13 +5,12 @@
 #     --namespace yk-talos-management-system --create-namespace \
 #     -f examples/helm/values.yaml
 #
-# Local development (custom registry, no webhooks):
+# Local development (custom registry):
 #   helm upgrade --install yk-talos-management ./charts/yk-talos-management \
 #     --namespace yk-talos-management-system --create-namespace \
 #     -f examples/helm/values.yaml \
 #     --set image.repository=localhost:5000/yk-talos-management \
-#     --set image.tag=dev \
-#     --set webhooks.enabled=false
+#     --set image.tag=dev
 
 image:
   repository: harbor-mgmt.yuriy-lab.cloud/dev/yk-talos-management
@@ -35,7 +34,6 @@ resources:
 ports:
   metrics: 8080
   health: 8081
-  webhook: 9443
 
 metrics:
   enabled: true
@@ -46,16 +44,6 @@ metrics:
 leaderElection:
   enabled: true
   id: yk-talos-management.lock
-
-# Webhooks require TLS. cert-manager must be installed in the cluster.
-# To use a different issuer, change issuerRef below.
-webhooks:
-  enabled: false
-  certManager:
-    enabled: true
-    issuerRef:
-      name: selfsigned-issuer
-      kind: ClusterIssuer
 
 # Pod-level security context — enforces non-root and a restricted seccomp profile.
 podSecurityContext:

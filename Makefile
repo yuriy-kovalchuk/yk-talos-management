@@ -117,9 +117,9 @@ build:
 	mkdir -p bin
 	go build -trimpath -ldflags="$(LDFLAGS) -X $(VERSION_PKG).Version=$(VERSION)" -o $(BINARY) ./cmd/
 
-## run: run the manager locally (webhooks disabled — no TLS outside a cluster)
+## run: run the manager locally
 run: build
-	DISABLE_WEBHOOKS=true ./$(BINARY) --zap-encoder=console --zap-log-level=1
+	./$(BINARY) --zap-encoder=console --zap-log-level=1
 
 ## clean: remove build artefacts
 clean:

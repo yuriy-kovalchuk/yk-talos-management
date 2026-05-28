@@ -45,7 +45,6 @@ type TalosClusterBootstrapStatus struct {
 // +kubebuilder:printcolumn:name=Cluster,type=string,JSONPath=.spec.clusterRef
 // +kubebuilder:printcolumn:name=Phase,type=string,JSONPath=.status.phase
 // +kubebuilder:resource:scope=Namespaced,path=talosclusterbootstraps,shortName=talosclusterbootstrap
-// +kubebuilder:webhooks:verbs=create;update,path=/validate-talos-yuriykovalchuk-dev-v1alpha1-talosclusterbootstrap,validatingWebhookGeneratorStrategy=webhook-client
 
 // TalosClusterBootstrap bootstraps etcd on the first control plane node and stores the kubeconfig.
 type TalosClusterBootstrap struct {

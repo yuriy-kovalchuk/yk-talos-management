@@ -17,7 +17,6 @@ import (
 	"github.com/yuriy-kovalchuk/yk-talos-management/api/v1alpha1"
 	"github.com/yuriy-kovalchuk/yk-talos-management/internal/controller"
 	"github.com/yuriy-kovalchuk/yk-talos-management/internal/version"
-	"github.com/yuriy-kovalchuk/yk-talos-management/internal/webhook"
 )
 
 func Run() error {
@@ -47,10 +46,6 @@ func Run() error {
 
 	if err := setupControllers(mgr); err != nil {
 		return err
-	}
-
-	if isWebhookEnabled() {
-		setupWebhooks(mgr)
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -85,10 +80,6 @@ func isInCluster() bool {
 	_, host := os.LookupEnv("KUBERNETES_SERVICE_HOST")
 	_, port := os.LookupEnv("KUBERNETES_PORT")
 	return host && port
-}
-
-func isWebhookEnabled() bool {
-	return os.Getenv("DISABLE_WEBHOOKS") != "true"
 }
 
 // podNamespace returns the namespace the operator is running in.
@@ -127,15 +118,3 @@ func setupControllers(mgr ctrl.Manager) error {
 	return nil
 }
 
-const (
-	webhookPathTalosNode      = "/validate-talos-yuriykovalchuk-dev-v1alpha1-talosnode"
-	webhookPathTalosCluster   = "/validate-talos-yuriykovalchuk-dev-v1alpha1-taloscluster"
-	webhookPathTalosBootstrap = "/validate-talos-yuriykovalchuk-dev-v1alpha1-talosclusterbootstrap"
-)
-
-func setupWebhooks(mgr ctrl.Manager) {
-	s := mgr.GetWebhookServer()
-	s.Register(webhookPathTalosNode, webhook.TalosNodeHandler())
-	s.Register(webhookPathTalosCluster, webhook.TalosClusterHandler())
-	s.Register(webhookPathTalosBootstrap, webhook.TalosClusterBootstrapHandler())
-}

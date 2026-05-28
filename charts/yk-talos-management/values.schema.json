@@ -59,8 +59,7 @@
       "additionalProperties": false,
       "properties": {
         "metrics": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "health":  { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "webhook": { "type": "integer", "minimum": 1, "maximum": 65535 }
+        "health":  { "type": "integer", "minimum": 1, "maximum": 65535 }
       }
     },
     "metrics": {
@@ -104,28 +103,6 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "id":      { "type": "string", "minLength": 1 }
-      }
-    },
-    "webhooks": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": { "type": "boolean" },
-        "certManager": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "enabled": { "type": "boolean" },
-            "issuerRef": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "name": { "type": "string", "minLength": 1 },
-                "kind": { "type": "string", "enum": ["Issuer", "ClusterIssuer"] }
-              }
-            }
-          }
-        }
       }
     },
     "nodeSelector": { "type": "object" },

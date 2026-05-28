@@ -57,25 +57,6 @@ func TestBuildScheme(t *testing.T) {
 	}
 }
 
-func TestWebhookPaths(t *testing.T) {
-	tests := []struct {
-		name string
-		got string
-		want string
-	}{
-		{"TalosNode", webhookPathTalosNode, "/validate-talos-yuriykovalchuk-dev-v1alpha1-talosnode"},
-		{"TalosCluster", webhookPathTalosCluster, "/validate-talos-yuriykovalchuk-dev-v1alpha1-taloscluster"},
-		{"TalosBootstrap", webhookPathTalosBootstrap, "/validate-talos-yuriykovalchuk-dev-v1alpha1-talosclusterbootstrap"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.got != tt.want {
-				t.Errorf("webhookPath = %s, want %s", tt.got, tt.want)
-			}
-		})
-	}
-}
 
 func TestIsInCluster(t *testing.T) {
 	tests := []struct {
@@ -103,29 +84,6 @@ func TestIsInCluster(t *testing.T) {
 	}
 }
 
-func TestIsWebhookEnabled(t *testing.T) {
-	tests := []struct {
-		name    string
-		disable string
-		want    bool
-	}{
-		{name: "not set - enabled", disable: "", want: true},
-		{name: "DISABLE_WEBHOOKS=true - disabled", disable: "true", want: false},
-		{name: "DISABLE_WEBHOOKS=false - enabled", disable: "false", want: true},
-		{name: "DISABLE_WEBHOOKS=1 - enabled", disable: "1", want: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			setOrUnsetenv(t, "DISABLE_WEBHOOKS", tt.disable)
-
-			got := isWebhookEnabled()
-			if got != tt.want {
-				t.Errorf("isWebhookEnabled() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
 
 func TestPodNamespace(t *testing.T) {
 	tests := []struct {
