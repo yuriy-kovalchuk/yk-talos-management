@@ -202,7 +202,7 @@ func Bootstrap(ctx context.Context, c *Client, endpoint string) error {
 	defer cancel()
 	start := time.Now()
 	err := c.Bootstrap(talosclient.WithNode(ctx, endpoint), &machineapi.BootstrapRequest{})
-	appmetrics.APICallDuration.WithLabelValues("bootstrap", resultLabel(err)).Observe(time.Since(start).Seconds())
+	appmetrics.APICallDuration.WithLabelValues("bootstrap", appmetrics.ResultLabel(err)).Observe(time.Since(start).Seconds())
 	return err
 }
 
@@ -212,7 +212,7 @@ func GetKubeconfig(ctx context.Context, c *Client, endpoint string) ([]byte, err
 	defer cancel()
 	start := time.Now()
 	b, err := c.Kubeconfig(talosclient.WithNode(ctx, endpoint))
-	appmetrics.APICallDuration.WithLabelValues("get_kubeconfig", resultLabel(err)).Observe(time.Since(start).Seconds())
+	appmetrics.APICallDuration.WithLabelValues("get_kubeconfig", appmetrics.ResultLabel(err)).Observe(time.Since(start).Seconds())
 	return b, err
 }
 
@@ -227,7 +227,7 @@ func GetMachineConfig(ctx context.Context, c *Client, nodeIP string) ([]byte, er
 		talosclient.WithNode(ctx, nodeIP),
 		resource.NewMetadata(resourceconfig.NamespaceName, resourceconfig.MachineConfigType, resourceconfig.ActiveID, resource.VersionUndefined),
 	)
-	appmetrics.APICallDuration.WithLabelValues("get_machine_config", resultLabel(err)).Observe(time.Since(start).Seconds())
+	appmetrics.APICallDuration.WithLabelValues("get_machine_config", appmetrics.ResultLabel(err)).Observe(time.Since(start).Seconds())
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +253,7 @@ func GetHostname(ctx context.Context, c *Client, nodeIP string) (string, error) 
 		talosclient.WithNode(ctx, nodeIP),
 		resource.NewMetadata(resourcenetwork.NamespaceName, resourcenetwork.HostnameStatusType, resourcenetwork.HostnameID, resource.VersionUndefined),
 	)
-	appmetrics.APICallDuration.WithLabelValues("get_hostname", resultLabel(err)).Observe(time.Since(start).Seconds())
+	appmetrics.APICallDuration.WithLabelValues("get_hostname", appmetrics.ResultLabel(err)).Observe(time.Since(start).Seconds())
 	if err != nil {
 		return "", err
 	}
@@ -277,7 +277,7 @@ func ResetNode(ctx context.Context, c *Client, nodeIP string) error {
 		Graceful: false,
 		Reboot:   true,
 	})
-	appmetrics.APICallDuration.WithLabelValues("reset_node", resultLabel(err)).Observe(time.Since(start).Seconds())
+	appmetrics.APICallDuration.WithLabelValues("reset_node", appmetrics.ResultLabel(err)).Observe(time.Since(start).Seconds())
 	return err
 }
 
@@ -288,7 +288,7 @@ func EtcdLeave(ctx context.Context, c *Client, nodeIP string) error {
 	defer cancel()
 	start := time.Now()
 	err := c.EtcdLeaveCluster(talosclient.WithNode(ctx, nodeIP), &machineapi.EtcdLeaveClusterRequest{})
-	appmetrics.APICallDuration.WithLabelValues("etcd_leave", resultLabel(err)).Observe(time.Since(start).Seconds())
+	appmetrics.APICallDuration.WithLabelValues("etcd_leave", appmetrics.ResultLabel(err)).Observe(time.Since(start).Seconds())
 	return err
 }
 
@@ -315,15 +315,8 @@ func EtcdForceRemoveByIP(ctx context.Context, c *Client, survivorIP, deadNodeIP 
 	err = c.EtcdRemoveMemberByID(talosclient.WithNode(ctx, survivorIP), &machineapi.EtcdRemoveMemberByIDRequest{
 		MemberId: memberID,
 	})
-	appmetrics.APICallDuration.WithLabelValues("etcd_force_remove", resultLabel(err)).Observe(time.Since(start).Seconds())
+	appmetrics.APICallDuration.WithLabelValues("etcd_force_remove", appmetrics.ResultLabel(err)).Observe(time.Since(start).Seconds())
 	return err
-}
-
-func resultLabel(err error) string {
-	if err != nil {
-		return "error"
-	}
-	return "success"
 }
 
 // findEtcdMemberID scans member list messages and returns the ID of the member

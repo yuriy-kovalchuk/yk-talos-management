@@ -98,6 +98,15 @@ func init() {
 	)
 }
 
+// ResultLabel returns "success" when err is nil, "error" otherwise.
+// Shared by all packages that label Prometheus counters/histograms by outcome.
+func ResultLabel(err error) string {
+	if err != nil {
+		return "error"
+	}
+	return "success"
+}
+
 // RecordNodePhase transitions the NodePhase gauge from the previous phase to the new one.
 // Pass the same value for from and to to initialise the gauge without clearing anything.
 func RecordNodePhase(name, namespace, cluster, role, ip, from, to string) {

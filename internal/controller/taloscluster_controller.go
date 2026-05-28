@@ -48,9 +48,8 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return r.handleDeletion(ctx, &cluster)
 	}
 
-	talos.AddFinalizer(&cluster.Finalizers, talos.FinalizerCleanup)
-	if err := r.Update(ctx, &cluster); err != nil {
-		return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
+	if err := ensureFinalizer(ctx, r.Client, &cluster); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	if isUpToDate(&cluster) {
@@ -101,7 +100,7 @@ func (r *TalosClusterReconciler) handleDeletion(ctx context.Context, cluster *v1
 		if updateErr := r.Status().Update(ctx, cluster); updateErr != nil {
 			l.Error(updateErr, "update deleting status")
 		}
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: deletionGuardRequeueDelay}, nil
 	}
 
 	l.Info("Cleaning up cluster resources", "name", cluster.Name)

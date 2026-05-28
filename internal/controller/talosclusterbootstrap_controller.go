@@ -34,13 +34,6 @@ import (
 // +kubebuilder:rbac:groups=talos.yuriykovalchuk.dev,resources=talosnodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;delete
 
-// nodeReadyDelay is how long to wait before re-checking whether a ControlPlane node is Ready.
-const nodeReadyDelay = 10 * time.Second
-
-// apiServerCheckDelay is how long to wait between Kubernetes API server reachability probes.
-// The API server typically starts several seconds after Bootstrap() accepts the request.
-const apiServerCheckDelay = 15 * time.Second
-
 type TalosClusterBootstrapReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
@@ -68,13 +61,11 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 		return r.handleDeletion(ctx, &bootstrap)
 	}
 
-	talos.AddFinalizer(&bootstrap.Finalizers, talos.FinalizerCleanup)
-	if err := r.Update(ctx, &bootstrap); err != nil {
-		return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
+	if err := ensureFinalizer(ctx, r.Client, &bootstrap); err != nil {
+		return ctrl.Result{}, err
 	}
 
-	if bootstrap.Status.Phase == v1alpha1.TalosClusterBootstrapPhaseCompleted &&
-		bootstrap.Status.ObservedGeneration == bootstrap.Generation {
+	if isBootstrapUpToDate(&bootstrap) {
 		l.V(1).Info("Bootstrap complete, skipping", "generation", bootstrap.Generation)
 		return ctrl.Result{}, nil
 	}
@@ -216,7 +207,7 @@ func (r *TalosClusterBootstrapReconciler) waitForAPIServer(ctx context.Context, 
 		return r.setError(ctx, bootstrap, fmt.Errorf("load kubeconfig secret: %w", err))
 	}
 
-	apiClient, apiErr := r.buildRemoteAPIClient(kubeconfigSecret.Data["kubeconfig"])
+	apiClient, apiErr := remoteClientOrFallback(r.NewRemoteClient, kubeconfigSecret.Data["kubeconfig"])
 	if apiErr == nil {
 		_, apiErr = apiClient.Discovery().ServerVersion()
 	}
@@ -255,13 +246,10 @@ func (r *TalosClusterBootstrapReconciler) waitForAPIServer(ctx context.Context, 
 	return ctrl.Result{}, nil
 }
 
-// buildRemoteAPIClient creates a Kubernetes client from kubeconfig bytes.
-// Uses r.NewRemoteClient when set (tests), otherwise falls back to newRemoteClient.
-func (r *TalosClusterBootstrapReconciler) buildRemoteAPIClient(kubeconfig []byte) (kubernetes.Interface, error) {
-	if r.NewRemoteClient != nil {
-		return r.NewRemoteClient(kubeconfig)
-	}
-	return newRemoteClient(kubeconfig)
+// isBootstrapUpToDate returns true when bootstrap has completed and the spec is unchanged.
+func isBootstrapUpToDate(b *v1alpha1.TalosClusterBootstrap) bool {
+	return b.Status.Phase == v1alpha1.TalosClusterBootstrapPhaseCompleted &&
+		b.Status.ObservedGeneration == b.Generation
 }
 
 // waitForReadyNodes checks whether at least one ControlPlane node for this bootstrap's

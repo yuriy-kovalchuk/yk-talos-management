@@ -19,12 +19,6 @@ import (
 	appmetrics "github.com/yuriy-kovalchuk/yk-talos-management/internal/metrics"
 )
 
-const (
-	defaultDrainTimeout    = 5 * time.Minute
-	drainRequeueDelay      = 30 * time.Second
-	drainPollInterval      = 5 * time.Second
-)
-
 // drainAndDeleteNode cordons the Kubernetes node, drains workloads, and deletes
 // the Node object from the managed cluster. Returns (true, _, _) when done,
 // (false, result, _) to requeue on timeout. Silently skips if the kubeconfig
@@ -113,12 +107,7 @@ func (r *TalosNodeReconciler) buildRemoteClient(ctx context.Context, clusterRef,
 	if err != nil {
 		return nil, err
 	}
-
-	if r.NewRemoteClient != nil {
-		return r.NewRemoteClient(kubeconfigSecret.Data["kubeconfig"])
-	}
-
-	return newRemoteClient(kubeconfigSecret.Data["kubeconfig"])
+	return remoteClientOrFallback(r.NewRemoteClient, kubeconfigSecret.Data["kubeconfig"])
 }
 
 // newRemoteClient builds a real kubernetes.Interface from admin kubeconfig bytes.

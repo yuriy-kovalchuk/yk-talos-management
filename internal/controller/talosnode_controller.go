@@ -76,9 +76,8 @@ func (r *TalosNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.handleDeletion(ctx, &node)
 	}
 
-	talos.AddFinalizer(&node.Finalizers, talos.FinalizerCleanup)
-	if err := r.Update(ctx, &node); err != nil {
-		return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
+	if err := ensureFinalizer(ctx, r.Client, &node); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Standalone reset: annotation triggers a one-shot wipe+reboot to maintenance mode.
@@ -123,31 +122,25 @@ func driftEnabled(node *v1alpha1.TalosNode) bool {
 	return node.Spec.DriftDetection == nil || *node.Spec.DriftDetection
 }
 
-const (
-	etcdLeaveMaxAttempts = 3
-	etcdLeaveRetryDelay  = 90 * time.Second
-	driftCheckInterval   = 5 * time.Minute
-)
-
 // checkDrift fetches the running config from the node and compares it with the saved secret.
 // Connection failures are treated as "node offline" — logged at Info and requeued silently.
 func (r *TalosNodeReconciler) checkDrift(ctx context.Context, node *v1alpha1.TalosNode) (ctrl.Result, error) {
 	l := log.FromContext(ctx)
 
-	talosconfigSecret, err := getSecret(ctx, r.Client, clusterTalosconfigName(node.Spec.ClusterRef), node.Namespace)
+	talosconfigSecret, skip, err := getSecretOrSkip(ctx, r.Client, clusterTalosconfigName(node.Spec.ClusterRef), node.Namespace)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
-		}
 		return ctrl.Result{}, err
 	}
+	if skip {
+		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
+	}
 
-	savedSecret, err := getSecret(ctx, r.Client, nodeConfigName(node.Name), node.Namespace)
+	savedSecret, skip, err := getSecretOrSkip(ctx, r.Client, nodeConfigName(node.Name), node.Namespace)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
-		}
 		return ctrl.Result{}, err
+	}
+	if skip {
+		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
 	}
 
 	conn, err := r.Talos.Dial(ctx, talosconfigSecret.Data["talosconfig"], node.Spec.NodeIP)
@@ -234,7 +227,7 @@ func (r *TalosNodeReconciler) handleDeletion(ctx context.Context, node *v1alpha1
 			log.FromContext(ctx).Info(
 				"deletion blocked: this is the last ControlPlane node — add a replacement CP first, or delete the TalosCluster to tear down the entire cluster",
 				"name", node.Name, "cluster", node.Spec.ClusterRef)
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			return ctrl.Result{RequeueAfter: deletionGuardRequeueDelay}, nil
 		}
 	}
 
@@ -357,6 +350,17 @@ func (r *TalosNodeReconciler) handleStandaloneReset(ctx context.Context, node *v
 	return ctrl.Result{}, nil
 }
 
+// withConn dials endpoint via mTLS, calls op, then closes. Centralises the
+// dial → defer-close → call pattern used by single-operation helpers.
+func (r *TalosNodeReconciler) withConn(ctx context.Context, talosconfig []byte, endpoint string, op func(TalosConnection) error) error {
+	conn, err := r.Talos.Dial(ctx, talosconfig, endpoint)
+	if err != nil {
+		return fmt.Errorf("dial %s: %w", endpoint, err)
+	}
+	defer conn.Close() //nolint:errcheck
+	return op(conn)
+}
+
 // tryReset dials the node via mTLS and issues a reset (wipe + reboot to maintenance mode).
 func (r *TalosNodeReconciler) tryReset(ctx context.Context, node *v1alpha1.TalosNode) error {
 	talosconfig, _, skip, err := r.loadTalosconfig(ctx, node)
@@ -366,14 +370,9 @@ func (r *TalosNodeReconciler) tryReset(ctx context.Context, node *v1alpha1.Talos
 	if skip {
 		return fmt.Errorf("talosconfig or cluster not found")
 	}
-
-	conn, err := r.Talos.Dial(ctx, talosconfig, node.Spec.NodeIP)
-	if err != nil {
-		return fmt.Errorf("dial node: %w", err)
-	}
-	defer conn.Close() //nolint:errcheck
-
-	return conn.Reset(ctx, node.Spec.NodeIP)
+	return r.withConn(ctx, talosconfig, node.Spec.NodeIP, func(conn TalosConnection) error {
+		return conn.Reset(ctx, node.Spec.NodeIP)
+	})
 }
 
 // handleEtcdLeave manages etcd membership removal for a departing ControlPlane node.
@@ -453,23 +452,14 @@ func (r *TalosNodeReconciler) loadTalosconfig(ctx context.Context, node *v1alpha
 }
 
 func (r *TalosNodeReconciler) tryEtcdLeave(ctx context.Context, nodeIP string, talosconfig []byte) error {
-	conn, err := r.Talos.Dial(ctx, talosconfig, nodeIP)
-	if err != nil {
-		return fmt.Errorf("dial node: %w", err)
-	}
-	defer conn.Close() //nolint:errcheck
-	return conn.EtcdLeave(ctx, nodeIP)
+	return r.withConn(ctx, talosconfig, nodeIP, func(conn TalosConnection) error {
+		return conn.EtcdLeave(ctx, nodeIP)
+	})
 }
 
 // survivingPeers returns all endpoints except the one matching excludeIP.
 func survivingPeers(endpoints []string, excludeIP string) []string {
-	var peers []string
-	for _, ep := range endpoints {
-		if ep != excludeIP {
-			peers = append(peers, ep)
-		}
-	}
-	return peers
+	return filterExclude(endpoints, excludeIP)
 }
 
 // removeEndpointFromCluster removes nodeIP from TalosCluster.spec.endpoints.
@@ -486,12 +476,7 @@ func (r *TalosNodeReconciler) removeEndpointFromCluster(ctx context.Context, nod
 			return err
 		}
 
-		var updated []string
-		for _, ep := range cluster.Spec.Endpoints {
-			if ep != node.Spec.NodeIP {
-				updated = append(updated, ep)
-			}
-		}
+		updated := filterExclude(cluster.Spec.Endpoints, node.Spec.NodeIP)
 
 		if len(updated) == len(cluster.Spec.Endpoints) {
 			return nil // IP was not in the list
@@ -624,17 +609,10 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 
 	var standalonePatches []string
 	for _, patch := range node.Spec.Patches {
-		var p map[string]interface{}
-		if err := yaml.Unmarshal([]byte(patch), &p); err != nil {
-			return fmt.Errorf("unmarshal patch: %w", err)
-		}
-		// Talos extension documents (RegistryMirrorConfig, KubeletConfig, …) carry
-		// an apiVersion field. Everything else is a machine/cluster config patch and
-		// should be deep-merged into the base config.
-		if _, isExtension := p["apiVersion"]; isExtension {
-			standalonePatches = append(standalonePatches, strings.TrimSpace(patch))
-		} else {
-			baseConfig = mergePatches(baseConfig, p)
+		var err error
+		baseConfig, err = applyRawPatch([]byte(patch), baseConfig, &standalonePatches)
+		if err != nil {
+			return fmt.Errorf("apply inline patch: %w", err)
 		}
 	}
 
@@ -647,14 +625,9 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 		if !ok {
 			return fmt.Errorf("patch secret %q has no key %q", ref.Name, ref.Key)
 		}
-		var p map[string]interface{}
-		if err := yaml.Unmarshal(raw, &p); err != nil {
-			return fmt.Errorf("unmarshal patch from secret %q key %q: %w", ref.Name, ref.Key, err)
-		}
-		if _, isExtension := p["apiVersion"]; isExtension {
-			standalonePatches = append(standalonePatches, strings.TrimSpace(string(raw)))
-		} else {
-			baseConfig = mergePatches(baseConfig, p)
+		baseConfig, err = applyRawPatch(raw, baseConfig, &standalonePatches)
+		if err != nil {
+			return fmt.Errorf("apply patch from secret %q key %q: %w", ref.Name, ref.Key, err)
 		}
 	}
 
@@ -724,6 +697,21 @@ func (r *TalosNodeReconciler) saveNodeConfig(ctx context.Context, node *v1alpha1
 		func() *corev1.Secret { return newSecret(name, node.Namespace, "config.yaml", configBytes) },
 		func(s *corev1.Secret) { s.Data = map[string][]byte{"config.yaml": configBytes} },
 	)
+}
+
+// applyRawPatch parses raw YAML and either deep-merges it into baseConfig
+// (plain machine config patch) or appends it to standalonePatches (extension
+// document that carries an apiVersion field, e.g. RegistryMirrorConfig).
+func applyRawPatch(raw []byte, baseConfig map[string]interface{}, standalonePatches *[]string) (map[string]interface{}, error) {
+	var p map[string]interface{}
+	if err := yaml.Unmarshal(raw, &p); err != nil {
+		return baseConfig, fmt.Errorf("unmarshal patch: %w", err)
+	}
+	if _, isExtension := p["apiVersion"]; isExtension {
+		*standalonePatches = append(*standalonePatches, strings.TrimSpace(string(raw)))
+		return baseConfig, nil
+	}
+	return mergePatches(baseConfig, p), nil
 }
 
 // mergePatches deep-merges patch into base, with patch values taking precedence.
