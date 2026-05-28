@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	"github.com/yuriy-kovalchuk/yk-talos-management/internal/config"
 	appmetrics "github.com/yuriy-kovalchuk/yk-talos-management/internal/metrics"
 	"github.com/yuriy-kovalchuk/yk-talos-management/internal/talos"
 )
@@ -61,13 +62,7 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if talos.IsContextCancelled(err) {
 			return ctrl.Result{}, nil
 		}
-		appmetrics.RecordClusterPhase(cluster.Name, cluster.Namespace, string(v1alpha1.TalosPhaseProvisioning), string(v1alpha1.TalosPhaseError))
-		cluster.Status.Phase = v1alpha1.TalosPhaseError
-		emitEvent(r.Recorder, &cluster, corev1.EventTypeWarning, "ProvisionFailed", err.Error())
-		if updateErr := r.Status().Update(ctx, &cluster); updateErr != nil {
-			l.Error(updateErr, "failed to update error status")
-		}
-		return ctrl.Result{}, fmt.Errorf("provision: %w", err)
+		return r.setError(ctx, &cluster, fmt.Errorf("provision: %w", err))
 	}
 
 	l.Info("Cluster provisioned", "phase", cluster.Status.Phase)
@@ -176,7 +171,7 @@ func (r *TalosClusterReconciler) provision(ctx context.Context, cluster *v1alpha
 		return fmt.Errorf("store secrets: %w", err)
 	}
 
-	configs, err := talos.GenConfig(cluster.Spec.ClusterName, cluster.Spec.Endpoints, cluster.Spec.TalosVersion, bundle)
+	configs, err := talos.GenConfig(cluster.Spec.ClusterName, cluster.Spec.Endpoints, cluster.Spec.TalosVersion, bundle, cluster.Spec.KubernetesVersion)
 	if err != nil {
 		return err
 	}
@@ -195,6 +190,7 @@ func (r *TalosClusterReconciler) provision(ctx context.Context, cluster *v1alpha
 	}
 
 	cluster.Status.Phase = v1alpha1.TalosPhaseReady
+	cluster.Status.RetryCount = 0
 	appmetrics.RecordClusterPhase(cluster.Name, cluster.Namespace, string(v1alpha1.TalosPhaseProvisioning), string(v1alpha1.TalosPhaseReady))
 	now := metav1.Now()
 	cluster.Status.LastUpdateTime = &now
@@ -203,6 +199,18 @@ func (r *TalosClusterReconciler) provision(ctx context.Context, cluster *v1alpha
 	talos.SetConditionStatus(&cluster.Status.Conditions,
 		v1alpha1.TalosClusterConditionConfigsGenerated, metav1.ConditionTrue, "Generated", "Cluster configs generated successfully")
 	return r.Status().Update(ctx, cluster)
+}
+
+func (r *TalosClusterReconciler) setError(ctx context.Context, cluster *v1alpha1.TalosCluster, err error) (ctrl.Result, error) {
+	cluster.Status.RetryCount++
+	delay := config.GetRetryDelay(cluster.Status.RetryCount)
+	appmetrics.RecordClusterPhase(cluster.Name, cluster.Namespace, string(cluster.Status.Phase), string(v1alpha1.TalosPhaseError))
+	cluster.Status.Phase = v1alpha1.TalosPhaseError
+	emitEvent(r.Recorder, cluster, corev1.EventTypeWarning, "ProvisionFailed", err.Error())
+	if updateErr := r.Status().Update(ctx, cluster); updateErr != nil {
+		log.FromContext(ctx).Error(updateErr, "update error status")
+	}
+	return ctrl.Result{RequeueAfter: delay}, nil
 }
 
 func (r *TalosClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {

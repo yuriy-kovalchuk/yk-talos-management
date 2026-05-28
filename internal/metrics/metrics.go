@@ -79,6 +79,18 @@ var (
 		Name: "talos_node_drain_total",
 		Help: "Total node drain operations by result (success, skipped, timeout, error).",
 	}, []string{"result", "cluster"})
+
+	// NodeUpgradeTotal counts Talos node upgrade outcomes by result.
+	NodeUpgradeTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "talos_node_upgrade_total",
+		Help: "Total Talos node upgrade operations by result (success, error, skipped, blocked).",
+	}, []string{"result", "cluster"})
+
+	// ExtensionSchematicTotal counts Image Factory schematic operations by result.
+	ExtensionSchematicTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "talos_extension_schematic_total",
+		Help: "Total Image Factory schematic operations by result (success, error, cached).",
+	}, []string{"result", "cluster"})
 )
 
 func init() {
@@ -95,6 +107,8 @@ func init() {
 		SecretOperationsTotal,
 		BootstrapDuration,
 		NodeDrainTotal,
+		NodeUpgradeTotal,
+		ExtensionSchematicTotal,
 	)
 }
 

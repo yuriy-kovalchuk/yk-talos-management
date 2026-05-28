@@ -21,4 +21,8 @@ const (
 
 	// Deletion guards: last-CP and cluster-with-active-nodes.
 	deletionGuardRequeueDelay = 30 * time.Second
+
+	// Upgrade check: how often to poll after initiating an upgrade until the node
+	// comes back online running the expected Talos version.
+	upgradeCheckInterval = 30 * time.Second
 )

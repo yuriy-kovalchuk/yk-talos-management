@@ -5,9 +5,9 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/cosi-project/runtime/pkg/resource"
@@ -95,15 +95,22 @@ func LoadOrGenSecretsBundle(existingJSON []byte, talosVersion string) (*secrets.
 // address and all endpoints are embedded in the talosconfig so any control plane can be reached.
 // bundle must be the same pointer returned by GenSecretsBundle — this guarantees all configs are
 // signed by the same CA and share the same tokens.
-func GenConfig(clusterName string, endpoints []string, talosVersion string, bundle *secrets.Bundle) (*ClusterConfigs, error) {
+func GenConfig(clusterName string, endpoints []string, talosVersion string, bundle *secrets.Bundle, kubernetesVersion string) (*ClusterConfigs, error) {
+	if len(endpoints) == 0 {
+		return nil, fmt.Errorf("no endpoints configured")
+	}
 	contract, err := machineconfig.ParseContractFromVersion(talosVersion)
 	if err != nil {
 		return nil, fmt.Errorf("parse version: %w", err)
 	}
+	k8sVersion := kubernetesVersion
+	if k8sVersion == "" {
+		k8sVersion = constants.DefaultKubernetesVersion
+	}
 	input, err := generate.NewInput(
 		clusterName,
 		"https://"+endpoints[0]+":6443",
-		constants.DefaultKubernetesVersion,
+		k8sVersion,
 		generate.WithVersionContract(contract),
 		generate.WithSecretsBundle(bundle),
 		generate.WithEndpointList(endpoints),
@@ -266,6 +273,44 @@ func GetHostname(ctx context.Context, c *Client, nodeIP string) (string, error) 
 	return hs.TypedSpec().Hostname, nil
 }
 
+// GetVersion fetches the Talos version and platform mode for nodeIP.
+// Returns the version tag (e.g. "v1.13.0") and the platform mode string
+// (e.g. "container", "metal", "cloud").
+func GetVersion(ctx context.Context, c *Client, nodeIP string) (tag, mode string, err error) {
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
+
+	start := time.Now()
+	resp, respErr := c.Version(talosclient.WithNode(ctx, nodeIP))
+	appmetrics.APICallDuration.WithLabelValues("get_version", appmetrics.ResultLabel(respErr)).Observe(time.Since(start).Seconds())
+	if respErr != nil {
+		return "", "", respErr
+	}
+
+	for _, msg := range resp.GetMessages() {
+		if v := msg.GetVersion(); v != nil {
+			tag = v.GetTag()
+		}
+		if p := msg.GetPlatform(); p != nil {
+			mode = p.GetMode()
+		}
+		return tag, mode, nil
+	}
+	return "", "", fmt.Errorf("no version message returned for node %s", nodeIP)
+}
+
+// UpgradeNode initiates an in-place Talos upgrade to the given installer image.
+// The call returns as soon as the node acknowledges the request; the node will
+// reboot to complete the upgrade. Mirrors `talosctl upgrade --image <image>`.
+func UpgradeNode(ctx context.Context, c *Client, nodeIP, image string) error {
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
+	start := time.Now()
+	_, err := c.Upgrade(talosclient.WithNode(ctx, nodeIP), image, false, false)
+	appmetrics.APICallDuration.WithLabelValues("upgrade_node", appmetrics.ResultLabel(err)).Observe(time.Since(start).Seconds())
+	return err
+}
+
 // ResetNode wipes the node's ephemeral state and reboots it into maintenance mode.
 // Graceful is false so the reset proceeds even when the kubelet is in a degraded state.
 // Used for the standalone annotation-triggered reset and the spec.resetOnDelete path.
@@ -320,12 +365,19 @@ func EtcdForceRemoveByIP(ctx context.Context, c *Client, survivorIP, deadNodeIP 
 }
 
 // findEtcdMemberID scans member list messages and returns the ID of the member
-// whose peer URL contains deadNodeIP, or 0 if not found.
+// whose peer URL host matches deadNodeIP exactly, or 0 if not found.
+//
+// The URL host is parsed and compared directly so that an IP like "10.0.0.1"
+// cannot falsely match a peer URL for "10.0.0.10:2380" via substring matching.
 func findEtcdMemberID(messages []*machineapi.EtcdMembers, deadNodeIP string) uint64 {
 	for _, msg := range messages {
 		for _, m := range msg.GetMembers() {
 			for _, peerURL := range m.GetPeerUrls() {
-				if strings.Contains(peerURL, deadNodeIP) {
+				u, err := url.Parse(peerURL)
+				if err != nil {
+					continue
+				}
+				if u.Hostname() == deadNodeIP {
 					return m.GetId()
 				}
 			}

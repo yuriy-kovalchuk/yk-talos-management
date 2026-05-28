@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/yuriy-kovalchuk/yk-talos-management/internal/config"
+	"github.com/yuriy-kovalchuk/yk-talos-management/internal/factory"
 	appmetrics "github.com/yuriy-kovalchuk/yk-talos-management/internal/metrics"
 	"github.com/yuriy-kovalchuk/yk-talos-management/internal/talos"
 )
@@ -39,6 +40,10 @@ type TalosNodeReconciler struct {
 	Talos           TalosDialer
 	Recorder        record.EventRecorder
 	NewRemoteClient func(kubeconfig []byte) (kubernetes.Interface, error)
+	// Factory creates Image Factory schematics for nodes with spec.systemExtensions.
+	// Injected in tests; production uses factory.New() set in run.go.
+	// When nil and spec.systemExtensions is non-empty the reconcile returns an error.
+	Factory factory.Client
 }
 
 func (r *TalosNodeReconciler) setError(ctx context.Context, node *v1alpha1.TalosNode, err error) (ctrl.Result, error) {
@@ -80,10 +85,25 @@ func (r *TalosNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
+	// Upgrade check: initiated by the talos.yuriykovalchuk.dev/upgrade annotation.
+	// Phase check comes first so we don't re-trigger on the same annotation while
+	// the node is rebooting after the upgrade RPC was already sent.
+	if node.Status.Phase == v1alpha1.TalosNodePhaseUpgrading {
+		return r.checkUpgradeComplete(ctx, &node)
+	}
+	// Annotation-based upgrade (imperative escape hatch, highest priority).
+	if v := node.Annotations[talos.AnnotationUpgrade]; v != "" && v != node.Annotations[talos.AnnotationLastUpgrade] {
+		return r.handleUpgrade(ctx, &node, v)
+	}
+	// Spec-driven upgrade: spec.talosVersion and/or spec.systemExtensions changed.
+	if result, done, err := r.reconcileVersion(ctx, &node); done {
+		return result, err
+	}
+
 	// Standalone reset: annotation triggers a one-shot wipe+reboot to maintenance mode.
-	// The annotation is removed before the reset call so a crash mid-reset does not loop.
-	// On success the controller clears ConfigApplied so the next reconcile re-applies config.
-	if node.Annotations[talos.AnnotationReset] == "true" {
+	// GitOps-safe: the companion last-reset annotation records the processed request ID
+	// so ArgoCD/Flux re-adding the annotation does not cause an infinite loop.
+	if v := node.Annotations[talos.AnnotationReset]; v != "" && v != node.Annotations[talos.AnnotationLastReset] {
 		return r.handleStandaloneReset(ctx, &node)
 	}
 
@@ -143,7 +163,14 @@ func (r *TalosNodeReconciler) checkDrift(ctx context.Context, node *v1alpha1.Tal
 		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
 	}
 
-	conn, err := r.Talos.Dial(ctx, talosconfigSecret.Data["talosconfig"], node.Spec.NodeIP)
+	talosconfigBytes, err := secretKey(talosconfigSecret, "talosconfig")
+	if err != nil {
+		l.Error(err, "drift check: malformed talosconfig secret", "ip", node.Spec.NodeIP)
+		appmetrics.DriftCheckTotal.WithLabelValues("error", node.Spec.ClusterRef, node.Name).Inc()
+		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
+	}
+
+	conn, err := r.Talos.Dial(ctx, talosconfigBytes, node.Spec.NodeIP)
 	if err != nil {
 		l.Info("drift check: node unreachable, will retry", "ip", node.Spec.NodeIP, "requeueAfter", driftCheckInterval)
 		appmetrics.DriftCheckTotal.WithLabelValues("unreachable", node.Spec.ClusterRef, node.Name).Inc()
@@ -158,7 +185,14 @@ func (r *TalosNodeReconciler) checkDrift(ctx context.Context, node *v1alpha1.Tal
 		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
 	}
 
-	drifted, err := configsDiffer(savedSecret.Data["config.yaml"], remoteBytes)
+	savedConfig, err := secretKey(savedSecret, "config.yaml")
+	if err != nil {
+		l.Error(err, "drift check: malformed saved config secret", "ip", node.Spec.NodeIP)
+		appmetrics.DriftCheckTotal.WithLabelValues("error", node.Spec.ClusterRef, node.Name).Inc()
+		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
+	}
+
+	drifted, err := configsDiffer(savedConfig, remoteBytes)
 	if err != nil {
 		l.Error(err, "drift check: comparison failed", "ip", node.Spec.NodeIP)
 		appmetrics.DriftCheckTotal.WithLabelValues("error", node.Spec.ClusterRef, node.Name).Inc()
@@ -175,8 +209,6 @@ func (r *TalosNodeReconciler) checkDrift(ctx context.Context, node *v1alpha1.Tal
 	l.Info("drift detected, re-applying config", "ip", node.Spec.NodeIP)
 	emitEvent(r.Recorder, node, corev1.EventTypeWarning, "DriftDetected", "Node config drift detected, re-applying")
 
-	// Force re-apply: clear observed generation so applyConfig treats this as an update.
-	node.Status.ObservedGeneration = node.Generation - 1
 	if err := r.applyConfig(ctx, node); err != nil {
 		if talos.IsContextCancelled(err) {
 			return ctrl.Result{}, nil
@@ -302,27 +334,26 @@ func (r *TalosNodeReconciler) handleDeletion(ctx context.Context, node *v1alpha1
 }
 
 // handleStandaloneReset performs a one-shot reset triggered by the
-// talos.yuriykovalchuk.dev/reset=true annotation. It removes the annotation BEFORE
-// calling Reset so a controller crash mid-reset cannot loop. On success it clears
-// the ConfigApplied condition so the next reconcile re-applies the machine config
-// (the node reboots into maintenance mode and needs a fresh config apply).
+// talos.yuriykovalchuk.dev/reset annotation. The annotation value is treated as a
+// request ID — any non-empty string works ("true", a UUID, a timestamp).
+//
+// GitOps-safe: the companion annotation last-reset is set to the request ID BEFORE
+// calling Reset so that:
+//   - A controller crash during reset does not loop (last-reset matches → skip).
+//   - ArgoCD/Flux re-adding the annotation does not cause a second reset (same ID).
+//
+// To trigger a second reset, change the annotation value to a new unique string.
+// On success, ConfigApplied is cleared so the next reconcile re-applies config.
 func (r *TalosNodeReconciler) handleStandaloneReset(ctx context.Context, node *v1alpha1.TalosNode) (ctrl.Result, error) {
 	l := log.FromContext(ctx)
 
-	// Remove the annotation first — prevents retry loops on crash.
-	// Snapshot the node state as the patch base (TalosNode has no generated DeepCopy,
-	// so copy the struct and duplicate the annotations map manually).
-	base := &v1alpha1.TalosNode{}
-	*base = *node
-	oldAnnotations := make(map[string]string, len(node.Annotations))
-	for k, v := range node.Annotations {
-		oldAnnotations[k] = v
-	}
-	base.Annotations = oldAnnotations
-	patch := client.MergeFrom(base)
-	delete(node.Annotations, talos.AnnotationReset)
-	if err := r.Patch(ctx, node, patch); err != nil {
-		return ctrl.Result{}, fmt.Errorf("remove reset annotation: %w", err)
+	// Record last-reset = current reset ID before calling Reset.
+	// This prevents both crash-loop and GitOps re-add loops.
+	resetID := node.Annotations[talos.AnnotationReset]
+	if err := patchAnnotations(ctx, r.Client, node, map[string]string{
+		talos.AnnotationLastReset: resetID,
+	}); err != nil {
+		return ctrl.Result{}, fmt.Errorf("set last-reset annotation: %w", err)
 	}
 
 	emitEvent(r.Recorder, node, corev1.EventTypeNormal, "NodeResetTriggered", "Node reset triggered via annotation")
@@ -448,7 +479,11 @@ func (r *TalosNodeReconciler) loadTalosconfig(ctx context.Context, node *v1alpha
 		return nil, nil, false, err
 	}
 
-	return secret.Data["talosconfig"], cluster.Spec.Endpoints, false, nil
+	talosconfigBytes, err := secretKey(secret, "talosconfig")
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("read talosconfig secret: %w", err)
+	}
+	return talosconfigBytes, cluster.Spec.Endpoints, false, nil
 }
 
 func (r *TalosNodeReconciler) tryEtcdLeave(ctx context.Context, nodeIP string, talosconfig []byte) error {
@@ -480,6 +515,9 @@ func (r *TalosNodeReconciler) removeEndpointFromCluster(ctx context.Context, nod
 
 		if len(updated) == len(cluster.Spec.Endpoints) {
 			return nil // IP was not in the list
+		}
+		if len(updated) == 0 {
+			return nil // removing the last endpoint would leave an invalid cluster; skip
 		}
 
 		cluster.Spec.Endpoints = updated
@@ -554,7 +592,11 @@ func (r *TalosNodeReconciler) refreshKubeconfig(ctx context.Context, node *v1alp
 		return err
 	}
 
-	updated, err := updateKubeconfigServer(kubeconfigSecret.Data["kubeconfig"], cluster.Spec.Endpoints[0])
+	kubeconfigBytes, err := secretKey(kubeconfigSecret, "kubeconfig")
+	if err != nil {
+		return fmt.Errorf("read kubeconfig: %w", err)
+	}
+	updated, err := updateKubeconfigServer(kubeconfigBytes, cluster.Spec.Endpoints[0])
 	if err != nil {
 		return fmt.Errorf("rewrite kubeconfig server: %w", err)
 	}
@@ -582,10 +624,10 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 	fromPhase := node.Status.Phase
 	node.Status.ObservedGeneration = node.Generation
 	node.Status.Phase = v1alpha1.TalosNodePhaseApplying
-	appmetrics.RecordNodePhase(node.Name, node.Namespace, node.Spec.ClusterRef, string(node.Spec.Role), node.Spec.NodeIP, string(fromPhase), string(v1alpha1.TalosNodePhaseApplying))
 	if err := r.Status().Update(ctx, node); err != nil {
 		return fmt.Errorf("update status: %w", err)
 	}
+	appmetrics.RecordNodePhase(node.Name, node.Namespace, node.Spec.ClusterRef, string(node.Spec.Role), node.Spec.NodeIP, string(fromPhase), string(v1alpha1.TalosNodePhaseApplying))
 
 	cluster := &v1alpha1.TalosCluster{}
 	if err := r.Get(ctx, types.NamespacedName{Name: node.Spec.ClusterRef, Namespace: node.Namespace}, cluster); err != nil {
@@ -602,8 +644,12 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 		return fmt.Errorf("get config secret: %w", err)
 	}
 
+	baseConfigBytes, err := secretKey(configSecret, key)
+	if err != nil {
+		return fmt.Errorf("read base config: %w", err)
+	}
 	var baseConfig map[string]interface{}
-	if err := yaml.Unmarshal(configSecret.Data[key], &baseConfig); err != nil {
+	if err := yaml.Unmarshal(baseConfigBytes, &baseConfig); err != nil {
 		return fmt.Errorf("unmarshal config: %w", err)
 	}
 
@@ -650,7 +696,11 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 		if tcErr != nil {
 			return fmt.Errorf("get talosconfig secret: %w", tcErr)
 		}
-		conn, err = r.Talos.Dial(ctx, talosconfigSecret.Data["talosconfig"], node.Spec.NodeIP)
+		talosconfigBytes, tcErr := secretKey(talosconfigSecret, "talosconfig")
+		if tcErr != nil {
+			return fmt.Errorf("read talosconfig: %w", tcErr)
+		}
+		conn, err = r.Talos.Dial(ctx, talosconfigBytes, node.Spec.NodeIP)
 	}
 	if err != nil {
 		return fmt.Errorf("create client: %w", err)
@@ -665,15 +715,19 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 		return fmt.Errorf("save node config: %w", err)
 	}
 
-	appmetrics.RecordNodePhase(node.Name, node.Namespace, node.Spec.ClusterRef, string(node.Spec.Role), node.Spec.NodeIP, string(v1alpha1.TalosNodePhaseApplying), string(v1alpha1.TalosNodePhaseReady))
-	appmetrics.ConfigApplyTotal.WithLabelValues(string(node.Spec.Role), "success", node.Spec.ClusterRef).Inc()
 	node.Status.Phase = v1alpha1.TalosNodePhaseReady
 	node.Status.Message = "Configuration applied"
+	node.Status.RetryCount = 0
 	talos.SetConditionStatus(&node.Status.Conditions,
 		v1alpha1.TalosNodeConditionConfigApplied, metav1.ConditionTrue, "Applied", "Configuration applied successfully")
 	now := metav1.Now()
 	node.Status.LastUpdateTime = &now
-	return r.Status().Update(ctx, node)
+	if err := r.Status().Update(ctx, node); err != nil {
+		return err
+	}
+	appmetrics.RecordNodePhase(node.Name, node.Namespace, node.Spec.ClusterRef, string(node.Spec.Role), node.Spec.NodeIP, string(v1alpha1.TalosNodePhaseApplying), string(v1alpha1.TalosNodePhaseReady))
+	appmetrics.ConfigApplyTotal.WithLabelValues(string(node.Spec.Role), "success", node.Spec.ClusterRef).Inc()
+	return nil
 }
 
 // refreshConfigSizeMetric re-emits NodeConfigSizeBytes from the persisted config Secret.

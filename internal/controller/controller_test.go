@@ -72,26 +72,33 @@ func (f *fakeDialer) DialInsecure(_ context.Context, _ string) (TalosConnection,
 }
 
 type fakeConnection struct {
-	applyErr              error
-	applyConfigCall       bool
-	applyConfigFn         func(context.Context, string, []byte, string) error
-	bootstrapErr          error
-	bootstrapCall         bool
-	kubeconfig            []byte
-	kubeconfigErr         error
-	machineConfig         []byte
-	machineConfigErr      error
-	machineConfigCall     bool
-	hostname              string
-	hostnameErr           error
-	hostnameCall          bool
-	etcdLeaveErr          error
-	etcdLeaveCall         bool
-	etcdForceRemoveErr    error
-	etcdForceRemoveCall   bool
-	resetErr              error
-	resetCall             bool
-	closed                bool
+	applyErr            error
+	applyConfigCall     bool
+	applyConfigFn       func(context.Context, string, []byte, string) error
+	bootstrapErr        error
+	bootstrapCall       bool
+	kubeconfig          []byte
+	kubeconfigErr       error
+	machineConfig       []byte
+	machineConfigErr    error
+	machineConfigCall   bool
+	hostname            string
+	hostnameErr         error
+	hostnameCall        bool
+	versionTag          string
+	versionMode         string
+	versionErr          error
+	versionCall         bool
+	etcdLeaveErr        error
+	etcdLeaveCall       bool
+	etcdForceRemoveErr  error
+	etcdForceRemoveCall bool
+	resetErr            error
+	resetCall           bool
+	upgradeErr          error
+	upgradeCall         bool
+	upgradedImage       string
+	closed              bool
 }
 
 func (f *fakeConnection) ApplyConfig(ctx context.Context, nodeIP string, cfg []byte, cluster string) error {
@@ -121,6 +128,11 @@ func (f *fakeConnection) GetHostname(_ context.Context, _ string) (string, error
 	return f.hostname, f.hostnameErr
 }
 
+func (f *fakeConnection) GetVersion(_ context.Context, _ string) (string, string, error) {
+	f.versionCall = true
+	return f.versionTag, f.versionMode, f.versionErr
+}
+
 func (f *fakeConnection) EtcdLeave(_ context.Context, _ string) error {
 	f.etcdLeaveCall = true
 	return f.etcdLeaveErr
@@ -134,6 +146,12 @@ func (f *fakeConnection) EtcdForceRemove(_ context.Context, _, _ string) error {
 func (f *fakeConnection) Reset(_ context.Context, _ string) error {
 	f.resetCall = true
 	return f.resetErr
+}
+
+func (f *fakeConnection) Upgrade(_ context.Context, _ string, image string) error {
+	f.upgradeCall = true
+	f.upgradedImage = image
+	return f.upgradeErr
 }
 
 func (f *fakeConnection) Close() error {
@@ -1438,8 +1456,18 @@ func TestTalosClusterBootstrapReconciler_AlreadyCompleted(t *testing.T) {
 		},
 		Spec: v1alpha1.TalosClusterBootstrapSpec{ClusterRef: "mycluster"},
 		Status: v1alpha1.TalosClusterBootstrapStatus{
-			Phase:        v1alpha1.TalosClusterBootstrapPhaseCompleted,
-			CommonStatus: v1alpha1.CommonStatus{ObservedGeneration: 1},
+			Phase: v1alpha1.TalosClusterBootstrapPhaseCompleted,
+			CommonStatus: v1alpha1.CommonStatus{
+				ObservedGeneration: 1,
+				Conditions: []metav1.Condition{
+					{
+						Type:               v1alpha1.TalosClusterBootstrapConditionAPIServer,
+						Status:             metav1.ConditionTrue,
+						Reason:             "Ready",
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(s).
@@ -1911,9 +1939,12 @@ func TestTalosClusterBootstrapReconciler_SetError(t *testing.T) {
 		Build()
 	r := &TalosClusterBootstrapReconciler{Client: c, Scheme: s, Talos: &fakeDialer{conn: &fakeConnection{}}}
 
-	_, err := r.Reconcile(context.Background(), rreq("mybootstrap", "default"))
-	if err == nil {
-		t.Fatal("expected error when cluster not found")
+	result, err := r.Reconcile(context.Background(), rreq("mybootstrap", "default"))
+	if err != nil {
+		t.Fatalf("unexpected error from Reconcile: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected non-zero RequeueAfter after error")
 	}
 
 	var got v1alpha1.TalosClusterBootstrap
@@ -1925,6 +1956,9 @@ func TestTalosClusterBootstrapReconciler_SetError(t *testing.T) {
 	}
 	if got.Status.Message == "" {
 		t.Error("expected non-empty error message in status")
+	}
+	if got.Status.RetryCount != 1 {
+		t.Errorf("expected RetryCount=1, got %d", got.Status.RetryCount)
 	}
 }
 
@@ -2967,9 +3001,10 @@ func TestTalosNodeReconciler_HandleDeletion_WorkerDoesNotRemoveEndpoint(t *testi
 	}
 }
 
-// removeEndpointFromCluster empties the list when the last endpoint is removed.
-// (The upstream isLastControlPlane guard prevents reaching this in normal use.)
-func TestRemoveEndpointFromCluster_LastEndpoint_Empties(t *testing.T) {
+// removeEndpointFromCluster skips the update when removing the last endpoint would
+// produce an empty (invalid) Endpoints list. The cluster is left unchanged so the
+// user can decide how to handle the last-CP removal.
+func TestRemoveEndpointFromCluster_LastEndpoint_PreservesCluster(t *testing.T) {
 	s := newTestScheme(t)
 
 	node := &v1alpha1.TalosNode{
@@ -2995,8 +3030,9 @@ func TestRemoveEndpointFromCluster_LastEndpoint_Empties(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "mycluster", Namespace: "default"}, &updated); err != nil {
 		t.Fatalf("get TalosCluster: %v", err)
 	}
-	if len(updated.Spec.Endpoints) != 0 {
-		t.Errorf("expected empty endpoints list, got %v", updated.Spec.Endpoints)
+	// Guard kicks in — removing the last endpoint is a no-op; the list stays intact.
+	if len(updated.Spec.Endpoints) != 1 || updated.Spec.Endpoints[0] != "10.0.0.1" {
+		t.Errorf("expected endpoint list to be preserved as [10.0.0.1], got %v", updated.Spec.Endpoints)
 	}
 }
 
@@ -3382,7 +3418,7 @@ func readyNode() *v1alpha1.TalosNode {
 	}
 }
 
-// Standalone reset via annotation: Reset is called, annotation is removed, ConfigApplied is cleared.
+// Standalone reset via annotation: Reset is called and last-reset companion annotation is set.
 func TestTalosNodeReconciler_StandaloneReset_AnnotationTriggersReset(t *testing.T) {
 	s := newTestScheme(t)
 	conn := &fakeConnection{}
@@ -3408,18 +3444,19 @@ func TestTalosNodeReconciler_StandaloneReset_AnnotationTriggersReset(t *testing.
 		t.Error("expected Reset to be called when annotation is present")
 	}
 
-	// Annotation must be removed after reset.
+	// last-reset must be set to the same value as reset (GitOps-safe idempotency key).
 	var got v1alpha1.TalosNode
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "cp-reset", Namespace: "default"}, &got); err != nil {
 		t.Fatalf("get node: %v", err)
 	}
-	if got.Annotations["talos.yuriykovalchuk.dev/reset"] == "true" {
-		t.Error("expected reset annotation to be removed after reset")
+	if got.Annotations["talos.yuriykovalchuk.dev/last-reset"] != "true" {
+		t.Errorf("expected last-reset annotation = %q, got %q", "true", got.Annotations["talos.yuriykovalchuk.dev/last-reset"])
 	}
 }
 
-// Standalone reset: annotation is removed even when Reset returns an error.
-func TestTalosNodeReconciler_StandaloneReset_AnnotationRemovedOnFailure(t *testing.T) {
+// Standalone reset: last-reset companion annotation is set even when Reset returns an error
+// (prevents retry loops on the same annotation value).
+func TestTalosNodeReconciler_StandaloneReset_LastResetSetOnFailure(t *testing.T) {
 	s := newTestScheme(t)
 	conn := &fakeConnection{resetErr: errors.New("node unreachable")}
 
@@ -3438,13 +3475,42 @@ func TestTalosNodeReconciler_StandaloneReset_AnnotationRemovedOnFailure(t *testi
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 
-	// Annotation must still be removed even though Reset failed.
+	// last-reset must be set so the same annotation value is not re-processed.
 	var got v1alpha1.TalosNode
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "cp-reset", Namespace: "default"}, &got); err != nil {
 		t.Fatalf("get node: %v", err)
 	}
-	if got.Annotations["talos.yuriykovalchuk.dev/reset"] == "true" {
-		t.Error("expected reset annotation to be removed even when Reset fails")
+	if got.Annotations["talos.yuriykovalchuk.dev/last-reset"] != "true" {
+		t.Errorf("expected last-reset annotation = %q, got %q", "true", got.Annotations["talos.yuriykovalchuk.dev/last-reset"])
+	}
+}
+
+// GitOps safety: reset is not re-triggered when reset == last-reset.
+func TestTalosNodeReconciler_StandaloneReset_GitOpsSafe_SameIDSkipped(t *testing.T) {
+	s := newTestScheme(t)
+	conn := &fakeConnection{}
+
+	node := readyNode()
+	node.Generation = 1
+	// Both annotations have the same value — simulates GitOps re-adding the annotation
+	// after the controller already processed it.
+	node.Annotations = map[string]string{
+		"talos.yuriykovalchuk.dev/reset":      "true",
+		"talos.yuriykovalchuk.dev/last-reset": "true",
+	}
+
+	objs := []client.Object{node, testCluster(), talosconfigSecret()}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(node).Build()
+
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: &fakeDialer{conn: conn}}
+	_, err := r.Reconcile(context.Background(), rreq("cp-reset", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	// Reset must NOT be called — the annotation value was already processed.
+	if conn.resetCall {
+		t.Error("expected Reset NOT to be called when reset == last-reset")
 	}
 }
 
@@ -3597,5 +3663,744 @@ func TestTalosNodeReconciler_ResetOnDelete_FailureDoesNotBlockDeletion(t *testin
 	getErr := c.Get(context.Background(), types.NamespacedName{Name: "cp-reset", Namespace: "default"}, &got)
 	if getErr == nil && containsStr(got.Finalizers, cleanupFinalizer) {
 		t.Error("expected finalizer to be removed even when reset fails")
+	}
+}
+
+// ── Upgrade tests ─────────────────────────────────────────────────────────────
+
+// Upgrade annotation triggers handleUpgrade and calls Upgrade on the connection.
+func TestTalosNodeReconciler_Upgrade_AnnotationTriggersUpgrade(t *testing.T) {
+	s := newTestScheme(t)
+	conn := &fakeConnection{versionTag: "v1.13.0", versionMode: "metal"}
+	dialer := &fakeDialer{conn: conn}
+
+	node := readyNode()
+	node.Generation = 1
+	node.Annotations = map[string]string{
+		"talos.yuriykovalchuk.dev/upgrade": "ghcr.io/siderolabs/installer:v1.13.1",
+	}
+
+	objs := []client.Object{node, testCluster(), talosconfigSecret()}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(node).Build()
+
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: dialer}
+	res, err := r.Reconcile(context.Background(), rreq("cp-reset", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	// Upgrade must have been called with the correct image.
+	if !conn.upgradeCall {
+		t.Error("expected Upgrade to be called when upgrade annotation is present")
+	}
+	if conn.upgradedImage != "ghcr.io/siderolabs/installer:v1.13.1" {
+		t.Errorf("expected upgradedImage = %q, got %q", "ghcr.io/siderolabs/installer:v1.13.1", conn.upgradedImage)
+	}
+
+	// Must requeue to poll for completion.
+	if res.RequeueAfter == 0 {
+		t.Error("expected a RequeueAfter delay after upgrade was initiated")
+	}
+
+	// last-upgrade must be set.
+	var got v1alpha1.TalosNode
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cp-reset", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("get node: %v", err)
+	}
+	if got.Annotations["talos.yuriykovalchuk.dev/last-upgrade"] != "ghcr.io/siderolabs/installer:v1.13.1" {
+		t.Errorf("expected last-upgrade annotation = %q, got %q",
+			"ghcr.io/siderolabs/installer:v1.13.1", got.Annotations["talos.yuriykovalchuk.dev/last-upgrade"])
+	}
+	// Phase must be Upgrading.
+	if got.Status.Phase != v1alpha1.TalosNodePhaseUpgrading {
+		t.Errorf("expected phase = Upgrading, got %q", got.Status.Phase)
+	}
+}
+
+// Container mode: upgrade is skipped with a Warning event; last-upgrade not set.
+func TestTalosNodeReconciler_Upgrade_ContainerModeSkipped(t *testing.T) {
+	s := newTestScheme(t)
+	conn := &fakeConnection{versionTag: "v1.13.0", versionMode: "container"}
+
+	node := readyNode()
+	node.Generation = 1
+	node.Annotations = map[string]string{
+		"talos.yuriykovalchuk.dev/upgrade": "ghcr.io/siderolabs/installer:v1.13.1",
+	}
+
+	objs := []client.Object{node, testCluster(), talosconfigSecret()}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(node).Build()
+
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: &fakeDialer{conn: conn}}
+	_, err := r.Reconcile(context.Background(), rreq("cp-reset", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	// Upgrade must NOT be called on container nodes.
+	if conn.upgradeCall {
+		t.Error("expected Upgrade NOT to be called on container mode node")
+	}
+
+	// last-upgrade must NOT be set (annotation not consumed, user can see it was skipped).
+	var got v1alpha1.TalosNode
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cp-reset", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("get node: %v", err)
+	}
+	if got.Annotations["talos.yuriykovalchuk.dev/last-upgrade"] != "" {
+		t.Errorf("expected last-upgrade annotation to be empty for container mode skip, got %q",
+			got.Annotations["talos.yuriykovalchuk.dev/last-upgrade"])
+	}
+}
+
+// GitOps safety: upgrade is not re-triggered when upgrade == last-upgrade.
+func TestTalosNodeReconciler_Upgrade_GitOpsSafe_SameImageSkipped(t *testing.T) {
+	s := newTestScheme(t)
+	conn := &fakeConnection{versionTag: "v1.13.1", versionMode: "metal"}
+
+	node := readyNode()
+	node.Generation = 1
+	// Both annotations have the same value — simulates GitOps re-adding the annotation.
+	node.Annotations = map[string]string{
+		"talos.yuriykovalchuk.dev/upgrade":      "ghcr.io/siderolabs/installer:v1.13.1",
+		"talos.yuriykovalchuk.dev/last-upgrade": "ghcr.io/siderolabs/installer:v1.13.1",
+	}
+
+	objs := []client.Object{node, testCluster(), talosconfigSecret()}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(node).Build()
+
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: &fakeDialer{conn: conn}}
+	_, err := r.Reconcile(context.Background(), rreq("cp-reset", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	// Upgrade must NOT be called — already processed.
+	if conn.upgradeCall {
+		t.Error("expected Upgrade NOT to be called when upgrade == last-upgrade")
+	}
+}
+
+// checkUpgradeComplete: node comes back with expected version → phase set to Ready.
+func TestTalosNodeReconciler_CheckUpgradeComplete_SuccessOnVersionMatch(t *testing.T) {
+	s := newTestScheme(t)
+	conn := &fakeConnection{versionTag: "v1.13.1", versionMode: "metal"}
+
+	node := readyNode()
+	node.Generation = 1
+	node.Status.Phase = v1alpha1.TalosNodePhaseUpgrading
+	node.Annotations = map[string]string{
+		"talos.yuriykovalchuk.dev/upgrade":      "ghcr.io/siderolabs/installer:v1.13.1",
+		"talos.yuriykovalchuk.dev/last-upgrade": "ghcr.io/siderolabs/installer:v1.13.1",
+	}
+
+	objs := []client.Object{node, testCluster(), talosconfigSecret()}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(node).Build()
+
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: &fakeDialer{conn: conn}}
+	_, err := r.Reconcile(context.Background(), rreq("cp-reset", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	var got v1alpha1.TalosNode
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cp-reset", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("get node: %v", err)
+	}
+	if got.Status.Phase != v1alpha1.TalosNodePhaseReady {
+		t.Errorf("expected phase = Ready after upgrade complete, got %q", got.Status.Phase)
+	}
+	if got.Status.CurrentTalosVersion != "v1.13.1" {
+		t.Errorf("expected CurrentTalosVersion = %q, got %q", "v1.13.1", got.Status.CurrentTalosVersion)
+	}
+}
+
+// checkUpgradeComplete: node still running old version → requeue, phase stays Upgrading.
+func TestTalosNodeReconciler_CheckUpgradeComplete_StillRebooting_Requeues(t *testing.T) {
+	s := newTestScheme(t)
+	conn := &fakeConnection{versionTag: "v1.13.0", versionMode: "metal"} // old version
+
+	node := readyNode()
+	node.Generation = 1
+	node.Status.Phase = v1alpha1.TalosNodePhaseUpgrading
+	node.Annotations = map[string]string{
+		"talos.yuriykovalchuk.dev/upgrade":      "ghcr.io/siderolabs/installer:v1.13.1",
+		"talos.yuriykovalchuk.dev/last-upgrade": "ghcr.io/siderolabs/installer:v1.13.1",
+	}
+
+	objs := []client.Object{node, testCluster(), talosconfigSecret()}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(node).Build()
+
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: &fakeDialer{conn: conn}}
+	res, err := r.Reconcile(context.Background(), rreq("cp-reset", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if res.RequeueAfter == 0 {
+		t.Error("expected RequeueAfter to be set while waiting for upgrade")
+	}
+
+	var got v1alpha1.TalosNode
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cp-reset", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("get node: %v", err)
+	}
+	if got.Status.Phase != v1alpha1.TalosNodePhaseUpgrading {
+		t.Errorf("expected phase to remain Upgrading while node is rebooting, got %q", got.Status.Phase)
+	}
+}
+
+// versionFromImage helper correctly extracts version tags.
+func TestVersionFromImage(t *testing.T) {
+	tests := []struct {
+		image string
+		want  string
+	}{
+		{"ghcr.io/siderolabs/installer:v1.13.1", "v1.13.1"},
+		{"installer:latest", "latest"},
+		{"installer", ""},
+		{"installer:", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.image, func(t *testing.T) {
+			got := versionFromImage(tt.image)
+			if got != tt.want {
+				t.Errorf("versionFromImage(%q) = %q, want %q", tt.image, got, tt.want)
+			}
+		})
+	}
+}
+
+// isDowngrade helper correctly identifies version regressions.
+func TestIsDowngrade(t *testing.T) {
+	tests := []struct {
+		name    string
+		current string
+		target  string
+		want    bool
+	}{
+		// clear downgrades
+		{"minor downgrade", "v1.13.0", "v1.12.9", true},
+		{"patch downgrade", "v1.13.2", "v1.13.0", true},
+		{"major downgrade", "v2.0.0", "v1.13.0", true},
+		// upgrades
+		{"patch upgrade", "v1.13.0", "v1.13.2", false},
+		{"minor upgrade", "v1.12.0", "v1.13.0", false},
+		{"major upgrade", "v1.13.0", "v2.0.0", false},
+		// same version — not a downgrade (e.g. schematic change only)
+		{"same version", "v1.13.0", "v1.13.0", false},
+		// unknown current — allow (first upgrade via operator)
+		{"empty current", "", "v1.13.0", false},
+		// unknown target — allow (digest-pinned or tagless image)
+		{"empty target", "v1.13.0", "", false},
+		// both empty — allow
+		{"both empty", "", "", false},
+		// unparseable — allow (private registry non-semver tags)
+		{"unparseable current", "nightly", "v1.13.0", false},
+		{"unparseable target", "v1.13.0", "nightly", false},
+		// without v prefix — still handled by ParseTolerant
+		{"no v prefix", "1.13.2", "1.13.0", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isDowngrade(tt.current, tt.target)
+			if got != tt.want {
+				t.Errorf("isDowngrade(%q, %q) = %v, want %v", tt.current, tt.target, got, tt.want)
+			}
+		})
+	}
+}
+
+// Downgrade is blocked: Upgrade RPC is not called, last-upgrade is consumed,
+// Warning event is emitted.
+func TestTalosNodeReconciler_Upgrade_DowngradeBlocked(t *testing.T) {
+	s := newTestScheme(t)
+	conn := &fakeConnection{versionTag: "v1.13.2", versionMode: "metal"}
+
+	node := readyNode()
+	node.Generation = 1
+	node.Status.CurrentTalosVersion = "v1.13.2"
+	node.Annotations = map[string]string{
+		"talos.yuriykovalchuk.dev/upgrade": "ghcr.io/siderolabs/installer:v1.13.0",
+	}
+
+	objs := []client.Object{node, testCluster(), talosconfigSecret()}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(node).Build()
+
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: &fakeDialer{conn: conn}}
+	res, err := r.Reconcile(context.Background(), rreq("cp-reset", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	// Must not requeue — the trigger was consumed.
+	if res.RequeueAfter != 0 {
+		t.Errorf("expected no RequeueAfter after downgrade block, got %v", res.RequeueAfter)
+	}
+
+	// Upgrade RPC must NOT have been called.
+	if conn.upgradeCall {
+		t.Error("expected Upgrade NOT to be called on a blocked downgrade")
+	}
+
+	// last-upgrade must be set so the warning does not fire on every reconcile.
+	var got v1alpha1.TalosNode
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cp-reset", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("get node: %v", err)
+	}
+	if got.Annotations["talos.yuriykovalchuk.dev/last-upgrade"] != "ghcr.io/siderolabs/installer:v1.13.0" {
+		t.Errorf("expected last-upgrade to be set after downgrade block, got %q",
+			got.Annotations["talos.yuriykovalchuk.dev/last-upgrade"])
+	}
+}
+
+// Same version is allowed — schematic change (extensions) can produce the same
+// version tag with a different image URL and must not be treated as a downgrade.
+func TestTalosNodeReconciler_Upgrade_SameVersionAllowed(t *testing.T) {
+	s := newTestScheme(t)
+	conn := &fakeConnection{versionTag: "v1.13.0", versionMode: "metal"}
+
+	node := readyNode()
+	node.Generation = 1
+	node.Status.CurrentTalosVersion = "v1.13.0"
+	// factory image at same version — different image URL, same version tag
+	node.Annotations = map[string]string{
+		"talos.yuriykovalchuk.dev/upgrade": "factory.talos.dev/installer/abc123:v1.13.0",
+	}
+
+	objs := []client.Object{node, testCluster(), talosconfigSecret()}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(node).Build()
+
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: &fakeDialer{conn: conn}}
+	_, err := r.Reconcile(context.Background(), rreq("cp-reset", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	// Upgrade must be called — same version is not a downgrade.
+	if !conn.upgradeCall {
+		t.Error("expected Upgrade to be called when target version equals current (schematic change)")
+	}
+}
+
+// Downgrade guard is bypassed when currentTalosVersion is unknown (empty) —
+// this is the first time the operator manages the node's version.
+func TestTalosNodeReconciler_Upgrade_UnknownCurrentVersionAllowed(t *testing.T) {
+	s := newTestScheme(t)
+	conn := &fakeConnection{versionTag: "v1.13.0", versionMode: "metal"}
+
+	node := readyNode()
+	node.Generation = 1
+	// CurrentTalosVersion is empty — node was never upgraded via operator
+	node.Status.CurrentTalosVersion = ""
+	node.Annotations = map[string]string{
+		"talos.yuriykovalchuk.dev/upgrade": "ghcr.io/siderolabs/installer:v1.12.0",
+	}
+
+	objs := []client.Object{node, testCluster(), talosconfigSecret()}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(node).Build()
+
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Talos: &fakeDialer{conn: conn}}
+	_, err := r.Reconcile(context.Background(), rreq("cp-reset", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	// Upgrade must proceed — we don't know the running version, so we allow it.
+	if !conn.upgradeCall {
+		t.Error("expected Upgrade to be called when currentTalosVersion is unknown")
+	}
+}
+
+// ── spec.talosVersion + spec.systemExtensions ─────────────────────────────────
+
+// fakeFactory implements factory.Client for testing. Not thread-safe — tests are sequential.
+type fakeFactory struct {
+	schematicID    string
+	err            error
+	callCount      int
+	lastExtensions []string
+}
+
+func (f *fakeFactory) CreateSchematic(_ context.Context, extensions []string) (string, error) {
+	f.callCount++
+	f.lastExtensions = append([]string(nil), extensions...)
+	return f.schematicID, f.err
+}
+
+// ── canonicalExtensions ───────────────────────────────────────────────────────
+
+func TestCanonicalExtensions(t *testing.T) {
+	tests := []struct {
+		name       string
+		extensions []string
+		want       string
+	}{
+		{"nil slice", nil, ""},
+		{"empty slice", []string{}, ""},
+		{"single extension", []string{"iscsi-tools"}, "iscsi-tools"},
+		{"already sorted", []string{"a", "b", "c"}, "a,b,c"},
+		{"unsorted", []string{"c", "a", "b"}, "a,b,c"},
+		{"real extensions unsorted", []string{"linux-tools", "iscsi-tools"}, "iscsi-tools,linux-tools"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := canonicalExtensions(tc.extensions)
+			if got != tc.want {
+				t.Errorf("canonicalExtensions(%v) = %q, want %q", tc.extensions, got, tc.want)
+			}
+		})
+	}
+}
+
+// ── computeDesiredImage ───────────────────────────────────────────────────────
+
+// No extensions → plain siderolabs installer image, factory never called.
+func TestComputeDesiredImage_NoExtensions(t *testing.T) {
+	node := &v1alpha1.TalosNode{
+		Spec: v1alpha1.TalosNodeSpec{TalosVersion: "v1.13.0"},
+	}
+	ff := &fakeFactory{}
+	r := &TalosNodeReconciler{Factory: ff}
+
+	result, err := r.computeDesiredImage(context.Background(), node)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	const want = "ghcr.io/siderolabs/installer:v1.13.0"
+	if result.Image != want {
+		t.Errorf("Image = %q, want %q", result.Image, want)
+	}
+	if result.NewSchematicID != "" {
+		t.Errorf("NewSchematicID should be empty when no extensions, got %q", result.NewSchematicID)
+	}
+	if ff.callCount != 0 {
+		t.Errorf("factory must not be called with no extensions, callCount = %d", ff.callCount)
+	}
+}
+
+// Extension list matches cached annotations → factory not called, cached schematic reused.
+func TestComputeDesiredImage_CacheHit(t *testing.T) {
+	node := &v1alpha1.TalosNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				"talos.yuriykovalchuk.dev/current-schematic": "cached-abc123",
+				"talos.yuriykovalchuk.dev/last-extensions":   "iscsi-tools",
+			},
+		},
+		Spec: v1alpha1.TalosNodeSpec{
+			TalosVersion:     "v1.13.0",
+			SystemExtensions: []string{"iscsi-tools"},
+		},
+	}
+	ff := &fakeFactory{schematicID: "should-not-be-used"}
+	r := &TalosNodeReconciler{Factory: ff}
+
+	result, err := r.computeDesiredImage(context.Background(), node)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	const want = "factory.talos.dev/installer/cached-abc123:v1.13.0"
+	if result.Image != want {
+		t.Errorf("Image = %q, want %q", result.Image, want)
+	}
+	if result.NewSchematicID != "" {
+		t.Errorf("NewSchematicID must be empty on cache hit, got %q", result.NewSchematicID)
+	}
+	if ff.callCount != 0 {
+		t.Errorf("factory must not be called on cache hit, callCount = %d", ff.callCount)
+	}
+}
+
+// Extension list changed → factory called, new schematic returned.
+func TestComputeDesiredImage_CacheMiss(t *testing.T) {
+	node := &v1alpha1.TalosNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				// Stale cache — extension set has changed since last call.
+				"talos.yuriykovalchuk.dev/current-schematic": "old-schematic",
+				"talos.yuriykovalchuk.dev/last-extensions":   "old-ext",
+			},
+		},
+		Spec: v1alpha1.TalosNodeSpec{
+			TalosVersion:     "v1.13.0",
+			SystemExtensions: []string{"iscsi-tools"},
+		},
+	}
+	ff := &fakeFactory{schematicID: "new-schematic-456"}
+	r := &TalosNodeReconciler{Factory: ff}
+
+	result, err := r.computeDesiredImage(context.Background(), node)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	const wantImage = "factory.talos.dev/installer/new-schematic-456:v1.13.0"
+	if result.Image != wantImage {
+		t.Errorf("Image = %q, want %q", result.Image, wantImage)
+	}
+	if result.NewSchematicID != "new-schematic-456" {
+		t.Errorf("NewSchematicID = %q, want %q", result.NewSchematicID, "new-schematic-456")
+	}
+	if result.NewCanonical != "iscsi-tools" {
+		t.Errorf("NewCanonical = %q, want %q", result.NewCanonical, "iscsi-tools")
+	}
+	if ff.callCount != 1 {
+		t.Errorf("factory must be called exactly once on cache miss, callCount = %d", ff.callCount)
+	}
+}
+
+// Factory API returns an error → computeDesiredImage propagates it.
+func TestComputeDesiredImage_FactoryError(t *testing.T) {
+	node := &v1alpha1.TalosNode{
+		Spec: v1alpha1.TalosNodeSpec{
+			TalosVersion:     "v1.13.0",
+			SystemExtensions: []string{"iscsi-tools"},
+		},
+	}
+	ff := &fakeFactory{err: errors.New("factory unreachable")}
+	r := &TalosNodeReconciler{Factory: ff}
+
+	_, err := r.computeDesiredImage(context.Background(), node)
+	if err == nil {
+		t.Fatal("expected error from factory, got nil")
+	}
+}
+
+// Factory field is nil but extensions are configured → error surfaced immediately.
+func TestComputeDesiredImage_NoFactoryConfigured(t *testing.T) {
+	node := &v1alpha1.TalosNode{
+		Spec: v1alpha1.TalosNodeSpec{
+			TalosVersion:     "v1.13.0",
+			SystemExtensions: []string{"iscsi-tools"},
+		},
+	}
+	r := &TalosNodeReconciler{Factory: nil}
+
+	_, err := r.computeDesiredImage(context.Background(), node)
+	if err == nil {
+		t.Fatal("expected error when Factory is nil but extensions are configured")
+	}
+	if !strings.Contains(err.Error(), "no factory client") {
+		t.Errorf("error = %q, want message about missing factory client", err.Error())
+	}
+}
+
+// ── reconcileVersion ──────────────────────────────────────────────────────────
+
+// spec.talosVersion is empty → reconcileVersion is a no-op (done=false).
+func TestReconcileVersion_SkippedWhenNoTalosVersion(t *testing.T) {
+	s := newTestScheme(t)
+	node := readyNode()
+	// TalosVersion deliberately left empty.
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(node).Build()
+	r := &TalosNodeReconciler{Client: c, Scheme: s}
+
+	result, done, err := r.reconcileVersion(context.Background(), node)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if done {
+		t.Error("done should be false when TalosVersion is empty")
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected empty result, got %+v", result)
+	}
+}
+
+// Version already matches status → no upgrade triggered, done=false.
+func TestReconcileVersion_NoAction_WhenAlreadyUpToDate(t *testing.T) {
+	s := newTestScheme(t)
+	node := readyNode()
+	node.Spec.TalosVersion = "v1.13.0"
+	node.Status.CurrentTalosVersion = "v1.13.0"
+	// No extensions — plain image, no factory call.
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(node).Build()
+	r := &TalosNodeReconciler{Client: c, Scheme: s}
+
+	_, done, err := r.reconcileVersion(context.Background(), node)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if done {
+		t.Errorf("done should be false when version is already up to date")
+	}
+}
+
+// spec.talosVersion changed (newer) → upgrade triggered with plain installer image.
+func TestReconcileVersion_TriggersUpgrade_VersionMismatch(t *testing.T) {
+	s := newTestScheme(t)
+	// conn.versionTag is the version currently running on the node (reported by GetVersion).
+	conn := &fakeConnection{versionTag: "v1.13.0", versionMode: "metal"}
+
+	node := readyNode()
+	node.Generation = 1
+	node.Spec.TalosVersion = "v1.13.1"
+	node.Status.CurrentTalosVersion = "v1.13.0"
+
+	objs := []client.Object{node, testCluster(), talosconfigSecret()}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(node).Build()
+	r := &TalosNodeReconciler{
+		Client: c,
+		Scheme: s,
+		Talos:  &fakeDialer{conn: conn},
+	}
+
+	result, done, err := r.reconcileVersion(context.Background(), node)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !done {
+		t.Error("done should be true when upgrade was triggered")
+	}
+	if !conn.upgradeCall {
+		t.Error("Upgrade RPC must be called")
+	}
+	const wantImage = "ghcr.io/siderolabs/installer:v1.13.1"
+	if conn.upgradedImage != wantImage {
+		t.Errorf("upgrade image = %q, want %q", conn.upgradedImage, wantImage)
+	}
+	// Expect a requeue while the node reboots.
+	if result.RequeueAfter == 0 {
+		t.Error("expected RequeueAfter to be set while node is upgrading")
+	}
+}
+
+// spec.systemExtensions changed while version stays the same → factory called,
+// schematic annotations persisted before upgrade RPC, upgrade triggered.
+func TestReconcileVersion_TriggersUpgrade_ExtensionChange(t *testing.T) {
+	s := newTestScheme(t)
+	conn := &fakeConnection{versionTag: "v1.13.0", versionMode: "metal"}
+
+	node := readyNode()
+	node.Generation = 1
+	node.Spec.TalosVersion = "v1.13.0"
+	node.Status.CurrentTalosVersion = "v1.13.0" // same version — only extensions changed
+	node.Spec.SystemExtensions = []string{"iscsi-tools"}
+	node.Annotations = map[string]string{
+		// Stale cache entry: canonical("iscsi-tools") != "old-ext" → cache miss.
+		"talos.yuriykovalchuk.dev/last-extensions": "old-ext",
+	}
+
+	ff := &fakeFactory{schematicID: "schematic-abc"}
+	objs := []client.Object{node, testCluster(), talosconfigSecret()}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(node).Build()
+	r := &TalosNodeReconciler{
+		Client:  c,
+		Scheme:  s,
+		Talos:   &fakeDialer{conn: conn},
+		Factory: ff,
+	}
+
+	_, done, err := r.reconcileVersion(context.Background(), node)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !done {
+		t.Error("done should be true when extension change triggers upgrade")
+	}
+	if !conn.upgradeCall {
+		t.Error("Upgrade RPC must be called after extension change")
+	}
+	const wantImage = "factory.talos.dev/installer/schematic-abc:v1.13.0"
+	if conn.upgradedImage != wantImage {
+		t.Errorf("upgrade image = %q, want %q", conn.upgradedImage, wantImage)
+	}
+	if ff.callCount != 1 {
+		t.Errorf("factory callCount = %d, want 1", ff.callCount)
+	}
+
+	// Schematic annotations must be persisted before the upgrade RPC.
+	var got v1alpha1.TalosNode
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cp-reset", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("get node: %v", err)
+	}
+	if got.Annotations["talos.yuriykovalchuk.dev/current-schematic"] != "schematic-abc" {
+		t.Errorf("current-schematic = %q, want %q",
+			got.Annotations["talos.yuriykovalchuk.dev/current-schematic"], "schematic-abc")
+	}
+	if got.Annotations["talos.yuriykovalchuk.dev/last-extensions"] != "iscsi-tools" {
+		t.Errorf("last-extensions = %q, want %q",
+			got.Annotations["talos.yuriykovalchuk.dev/last-extensions"], "iscsi-tools")
+	}
+}
+
+// Factory returns an error → done=true with a wrapped error, no upgrade triggered.
+func TestReconcileVersion_FactoryError(t *testing.T) {
+	s := newTestScheme(t)
+	node := readyNode()
+	node.Spec.TalosVersion = "v1.13.0"
+	node.Status.CurrentTalosVersion = "v1.13.0"
+	node.Spec.SystemExtensions = []string{"iscsi-tools"} // triggers factory on cache miss
+
+	ff := &fakeFactory{err: errors.New("factory down")}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(node).Build()
+	r := &TalosNodeReconciler{Client: c, Scheme: s, Factory: ff}
+
+	_, done, err := r.reconcileVersion(context.Background(), node)
+	if err == nil {
+		t.Fatal("expected factory error to propagate, got nil")
+	}
+	if !done {
+		t.Error("done should be true when a terminal error occurred")
+	}
+}
+
+// ── checkUpgradeComplete + extensions ─────────────────────────────────────────
+
+// After upgrade completion, InstalledExtensions is populated and ExtensionsUpToDate=True.
+func TestCheckUpgradeComplete_SetsInstalledExtensions(t *testing.T) {
+	s := newTestScheme(t)
+	// conn reports the target version as the currently running one → upgrade complete.
+	conn := &fakeConnection{versionTag: "v1.13.1", versionMode: "metal"}
+
+	node := readyNode()
+	node.Generation = 1
+	node.Status.Phase = v1alpha1.TalosNodePhaseUpgrading
+	node.Status.CurrentTalosVersion = "v1.13.0"
+	node.Spec.SystemExtensions = []string{"iscsi-tools", "linux-tools"}
+	node.Annotations = map[string]string{
+		// last-upgrade records the image that was sent to the Upgrade RPC.
+		"talos.yuriykovalchuk.dev/last-upgrade": "factory.talos.dev/installer/schematic-abc:v1.13.1",
+	}
+
+	objs := []client.Object{node, testCluster(), talosconfigSecret()}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(node).Build()
+	r := &TalosNodeReconciler{
+		Client: c,
+		Scheme: s,
+		Talos:  &fakeDialer{conn: conn},
+	}
+
+	_, err := r.Reconcile(context.Background(), rreq("cp-reset", "default"))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	var got v1alpha1.TalosNode
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cp-reset", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("get node: %v", err)
+	}
+
+	// Phase must be Ready after upgrade completion.
+	if got.Status.Phase != v1alpha1.TalosNodePhaseReady {
+		t.Errorf("Phase = %q, want Ready", got.Status.Phase)
+	}
+	// Version must be updated to the target.
+	if got.Status.CurrentTalosVersion != "v1.13.1" {
+		t.Errorf("CurrentTalosVersion = %q, want v1.13.1", got.Status.CurrentTalosVersion)
+	}
+	// InstalledExtensions must mirror spec.systemExtensions.
+	if len(got.Status.InstalledExtensions) != 2 {
+		t.Errorf("InstalledExtensions = %v (len %d), want 2 items", got.Status.InstalledExtensions, len(got.Status.InstalledExtensions))
+	}
+	// ExtensionsUpToDate condition must be set to True.
+	var condFound bool
+	for _, cond := range got.Status.Conditions {
+		if cond.Type == "ExtensionsUpToDate" && cond.Status == metav1.ConditionTrue {
+			condFound = true
+		}
+	}
+	if !condFound {
+		t.Errorf("expected ExtensionsUpToDate=True condition; got conditions %+v", got.Status.Conditions)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -59,20 +60,23 @@ func getSecretOrSkip(ctx context.Context, c client.Client, name, namespace strin
 
 // upsertSecret fetches the named secret and updates it, or creates it from scratch if absent.
 // newFn builds the full Secret to Create; updateFn mutates an existing Secret before Update.
+// Retries on conflict so callers don't need to handle the resource version mismatch case.
 func upsertSecret(ctx context.Context, c client.Client, name, namespace string, newFn func() *corev1.Secret, updateFn func(*corev1.Secret)) error {
-	existing, err := getSecret(ctx, c, name, namespace)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			err = c.Create(ctx, newFn())
-			appmetrics.SecretOperationsTotal.WithLabelValues("create", appmetrics.ResultLabel(err)).Inc()
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		existing, err := getSecret(ctx, c, name, namespace)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				err = c.Create(ctx, newFn())
+				appmetrics.SecretOperationsTotal.WithLabelValues("create", appmetrics.ResultLabel(err)).Inc()
+				return err
+			}
 			return err
 		}
+		updateFn(existing)
+		err = c.Update(ctx, existing)
+		appmetrics.SecretOperationsTotal.WithLabelValues("update", appmetrics.ResultLabel(err)).Inc()
 		return err
-	}
-	updateFn(existing)
-	err = c.Update(ctx, existing)
-	appmetrics.SecretOperationsTotal.WithLabelValues("update", appmetrics.ResultLabel(err)).Inc()
-	return err
+	})
 }
 
 // filterExclude returns a copy of items with all occurrences of exclude removed.
@@ -112,6 +116,36 @@ func drainSkipReason(node *v1alpha1.TalosNode) string {
 		return "annotation " + talos.AnnotationSkipDrain
 	}
 	return "spec.skipDrain"
+}
+
+// patchAnnotations atomically sets and/or deletes annotations on node using a
+// server-side MergeFrom patch.
+// Pass nil for set when only deletions are needed; pass no del args when only additions are needed.
+func patchAnnotations(ctx context.Context, c client.Client, node *v1alpha1.TalosNode, set map[string]string, del ...string) error {
+	base := node.DeepCopy()
+
+	if node.Annotations == nil {
+		node.Annotations = make(map[string]string)
+	}
+	for k, v := range set {
+		node.Annotations[k] = v
+	}
+	for _, k := range del {
+		delete(node.Annotations, k)
+	}
+	return c.Patch(ctx, node, client.MergeFrom(base))
+}
+
+// secretKey returns the value for key from the secret's Data map, or an error
+// when the key is absent or its value is empty. Use this instead of direct map
+// access so that a miscreated or hand-edited Secret surfaces a clear error
+// rather than silently applying an empty config.
+func secretKey(s *corev1.Secret, key string) ([]byte, error) {
+	v, ok := s.Data[key]
+	if !ok || len(v) == 0 {
+		return nil, fmt.Errorf("secret %s/%s missing or empty key %q", s.Namespace, s.Name, key)
+	}
+	return v, nil
 }
 
 // newSecret builds a bare Opaque Secret with a single data key.

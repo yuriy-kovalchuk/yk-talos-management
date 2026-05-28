@@ -20,10 +20,15 @@ type TalosConnection interface {
 	GetKubeconfig(ctx context.Context, endpoint string) ([]byte, error)
 	GetMachineConfig(ctx context.Context, nodeIP string) ([]byte, error)
 	GetHostname(ctx context.Context, nodeIP string) (string, error)
+	// GetVersion returns the Talos version tag (e.g. "v1.13.0") and platform mode
+	// (e.g. "container", "metal") running on nodeIP.
+	GetVersion(ctx context.Context, nodeIP string) (tag, mode string, err error)
 	EtcdLeave(ctx context.Context, nodeIP string) error
 	EtcdForceRemove(ctx context.Context, survivorIP, deadNodeIP string) error
 	// Reset wipes the node's ephemeral state and reboots it into maintenance mode.
 	Reset(ctx context.Context, nodeIP string) error
+	// Upgrade initiates an in-place Talos upgrade to the given installer image.
+	Upgrade(ctx context.Context, nodeIP, image string) error
 	Close() error
 }
 
@@ -78,8 +83,16 @@ func (r *realConnection) EtcdForceRemove(ctx context.Context, survivorIP, deadNo
 	return talos.EtcdForceRemoveByIP(ctx, r.c, survivorIP, deadNodeIP)
 }
 
+func (r *realConnection) GetVersion(ctx context.Context, nodeIP string) (string, string, error) {
+	return talos.GetVersion(ctx, r.c, nodeIP)
+}
+
 func (r *realConnection) Reset(ctx context.Context, nodeIP string) error {
 	return talos.ResetNode(ctx, r.c, nodeIP)
+}
+
+func (r *realConnection) Upgrade(ctx context.Context, nodeIP, image string) error {
+	return talos.UpgradeNode(ctx, r.c, nodeIP, image)
 }
 
 func (r *realConnection) Close() error {

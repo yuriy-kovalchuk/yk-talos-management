@@ -120,7 +120,7 @@ func TestGenConfig(t *testing.T) {
 		talosVersion = "v1.13.0"
 	)
 
-	cfg, err := GenConfig(clusterName, []string{endpoint}, talosVersion, bundle)
+	cfg, err := GenConfig(clusterName, []string{endpoint}, talosVersion, bundle, "")
 	if err != nil {
 		t.Fatalf("GenConfig() error = %v", err)
 	}
@@ -147,7 +147,7 @@ func TestGenConfig(t *testing.T) {
 	}
 
 	t.Run("invalid version returns error", func(t *testing.T) {
-		_, err := GenConfig(clusterName, []string{endpoint}, "invalid-version", bundle)
+		_, err := GenConfig(clusterName, []string{endpoint}, "invalid-version", bundle, "")
 		if err == nil {
 			t.Error("expected error for invalid version")
 		}

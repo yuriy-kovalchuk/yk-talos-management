@@ -58,6 +58,12 @@ spec:
                   type: string
                 minItems: 1
                 type: array
+              kubernetesVersion:
+                description: |-
+                  Kubernetes version to embed in the generated machine configs (e.g. "1.32.1").
+                  When unset, the Talos SDK's bundled default for the given Talos version is used.
+                  Override this when you need to pin a specific Kubernetes minor version.
+                type: string
               talosVersion:
                 description: Talos version used when generating machine configs (e.g.
                   v1.13.0).

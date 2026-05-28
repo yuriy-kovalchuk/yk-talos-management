@@ -91,7 +91,12 @@ func (r *TalosNodeReconciler) resolveNodeName(ctx context.Context, node *v1alpha
 		return "", fmt.Errorf("get talosconfig secret: %w", err)
 	}
 
-	conn, err := r.Talos.Dial(ctx, talosconfigSecret.Data["talosconfig"], node.Spec.NodeIP)
+	talosconfigBytes, err := secretKey(talosconfigSecret, "talosconfig")
+	if err != nil {
+		return "", fmt.Errorf("read talosconfig: %w", err)
+	}
+
+	conn, err := r.Talos.Dial(ctx, talosconfigBytes, node.Spec.NodeIP)
 	if err != nil {
 		return "", fmt.Errorf("dial node %s: %w", node.Spec.NodeIP, err)
 	}
@@ -107,7 +112,11 @@ func (r *TalosNodeReconciler) buildRemoteClient(ctx context.Context, clusterRef,
 	if err != nil {
 		return nil, err
 	}
-	return remoteClientOrFallback(r.NewRemoteClient, kubeconfigSecret.Data["kubeconfig"])
+	kubeconfigBytes, err := secretKey(kubeconfigSecret, "kubeconfig")
+	if err != nil {
+		return nil, fmt.Errorf("read kubeconfig: %w", err)
+	}
+	return remoteClientOrFallback(r.NewRemoteClient, kubeconfigBytes)
 }
 
 // newRemoteClient builds a real kubernetes.Interface from admin kubeconfig bytes.
@@ -149,6 +158,8 @@ func cordonNode(ctx context.Context, c kubernetes.Interface, nodeName string) er
 func drainPods(ctx context.Context, c kubernetes.Interface, nodeName, cluster string, timeout time.Duration) error {
 	l := log.FromContext(ctx)
 	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(drainPollInterval)
+	defer ticker.Stop()
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -201,7 +212,7 @@ func drainPods(ctx context.Context, c kubernetes.Interface, nodeName, cluster st
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(drainPollInterval):
+		case <-ticker.C:
 		}
 	}
 

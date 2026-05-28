@@ -16,6 +16,7 @@ import (
 
 	"github.com/yuriy-kovalchuk/yk-talos-management/api/v1alpha1"
 	"github.com/yuriy-kovalchuk/yk-talos-management/internal/controller"
+	"github.com/yuriy-kovalchuk/yk-talos-management/internal/factory"
 	"github.com/yuriy-kovalchuk/yk-talos-management/internal/version"
 )
 
@@ -104,6 +105,7 @@ func setupControllers(mgr ctrl.Manager) error {
 		Scheme:   mgr.GetScheme(),
 		Talos:    controller.RealDialer{},
 		Recorder: mgr.GetEventRecorderFor("talosnode-controller"),
+		Factory:  factory.New(),
 	}).SetupWithManager(mgr); err != nil {
 		return err
 	}
