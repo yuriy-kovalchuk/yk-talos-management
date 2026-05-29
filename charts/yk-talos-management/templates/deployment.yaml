@@ -35,6 +35,7 @@ spec:
             {{- if .Values.logLevel }}
             - --zap-log-level={{ .Values.logLevel }}
             {{- end }}
+            - --zap-encoder=json
           env:
             - name: POD_NAMESPACE
               valueFrom:

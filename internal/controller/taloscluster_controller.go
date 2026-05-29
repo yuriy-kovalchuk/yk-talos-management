@@ -40,7 +40,7 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	l.V(1).Info("Reconciling TalosCluster", "name", cluster.Name, "generation", cluster.Generation)
+	l.V(1).Info("reconciling TalosCluster", "generation", cluster.Generation)
 	start := time.Now()
 	defer func() { l.V(1).Info("reconcile done", "duration", time.Since(start)) }()
 	appmetrics.RecordClusterPhase(cluster.Name, cluster.Namespace, string(cluster.Status.Phase), string(cluster.Status.Phase))
@@ -54,7 +54,7 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if isUpToDate(&cluster) {
-		l.V(1).Info("Cluster up-to-date, skipping", "generation", cluster.Generation)
+		l.V(1).Info("cluster up-to-date, skipping", "generation", cluster.Generation)
 		return ctrl.Result{}, nil
 	}
 
@@ -65,7 +65,7 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return r.setError(ctx, &cluster, fmt.Errorf("provision: %w", err))
 	}
 
-	l.Info("Cluster provisioned", "phase", cluster.Status.Phase)
+	l.Info("cluster provisioned", "phase", cluster.Status.Phase)
 	emitEvent(r.Recorder, &cluster, corev1.EventTypeNormal, "Provisioned", "Cluster configs and secrets generated successfully")
 	return ctrl.Result{}, nil
 }
@@ -88,7 +88,7 @@ func (r *TalosClusterReconciler) handleDeletion(ctx context.Context, cluster *v1
 	}
 	if count > 0 {
 		l.Info("deletion blocked: TalosNode objects still reference this cluster; delete them first",
-			"name", cluster.Name, "activeNodes", count)
+			"activeNodes", count)
 		appmetrics.RecordClusterPhase(cluster.Name, cluster.Namespace,
 			string(cluster.Status.Phase), string(v1alpha1.TalosPhaseDeleting))
 		cluster.Status.Phase = v1alpha1.TalosPhaseDeleting
@@ -98,7 +98,7 @@ func (r *TalosClusterReconciler) handleDeletion(ctx context.Context, cluster *v1
 		return ctrl.Result{RequeueAfter: deletionGuardRequeueDelay}, nil
 	}
 
-	l.Info("Cleaning up cluster resources", "name", cluster.Name)
+	l.Info("cleaning up cluster resources")
 
 	sm := talos.NewSecretManager(r.Client, r.Scheme, cluster.Name, cluster.UID)
 	if err := sm.DeleteMultiple(ctx, cluster.Namespace,

@@ -178,7 +178,7 @@ func (r *TalosNodeReconciler) checkUpgradeComplete(ctx context.Context, node *v1
 		return ctrl.Result{RequeueAfter: upgradeCheckInterval}, nil
 	}
 
-	l.Info("Talos upgrade complete", "ip", node.Spec.NodeIP, "version", tag, "image", image)
+	l.Info("talos upgrade complete", "ip", node.Spec.NodeIP, "version", tag, "image", image)
 	emitEvent(r.Recorder, node, corev1.EventTypeNormal, "NodeUpgradeComplete",
 		fmt.Sprintf("Talos upgraded successfully to %s (version %s)", image, tag))
 	appmetrics.NodeUpgradeTotal.WithLabelValues("success", node.Spec.ClusterRef).Inc()

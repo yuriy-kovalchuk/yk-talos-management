@@ -42,12 +42,12 @@ func (r *TalosNodeReconciler) drainAndDeleteNode(ctx context.Context, node *v1al
 			"ip", node.Spec.NodeIP, "err", err)
 		return true, ctrl.Result{}, nil
 	}
-	l.V(1).Info("resolved kubernetes node name", "hostname", nodeName, "ip", node.Spec.NodeIP)
+	l.V(1).Info("resolved kubernetes node name", "k8sNode", nodeName, "ip", node.Spec.NodeIP)
 
 	// Verify the node object actually exists before attempting cordon/drain.
 	if _, err := remoteClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{}); err != nil {
 		if apierrors.IsNotFound(err) {
-			l.Info("kubernetes node not found, skipping drain and node deletion", "name", nodeName)
+			l.Info("kubernetes node not found, skipping drain and node deletion", "k8sNode", nodeName)
 			return true, ctrl.Result{}, nil
 		}
 		return false, ctrl.Result{}, fmt.Errorf("get node %s: %w", nodeName, err)
@@ -58,13 +58,13 @@ func (r *TalosNodeReconciler) drainAndDeleteNode(ctx context.Context, node *v1al
 		timeout = node.Spec.DrainTimeout.Duration
 	}
 
-	l.V(1).Info("cordoning node", "name", nodeName)
+	l.V(1).Info("cordoning node", "k8sNode", nodeName)
 	if err := cordonNode(ctx, remoteClient, nodeName); err != nil {
 		return false, ctrl.Result{}, fmt.Errorf("cordon node: %w", err)
 	}
 
 	if err := drainPods(ctx, remoteClient, nodeName, node.Spec.ClusterRef, timeout); err != nil {
-		l.Error(err, "drain timeout, will retry", "node", nodeName, "requeueAfter", drainRequeueDelay)
+		l.Error(err, "drain timeout, will retry", "k8sNode", nodeName, "requeueAfter", drainRequeueDelay.String())
 		appmetrics.NodeDrainTotal.WithLabelValues("timeout", node.Spec.ClusterRef).Inc()
 		return false, ctrl.Result{RequeueAfter: drainRequeueDelay}, nil
 	}
@@ -74,7 +74,7 @@ func (r *TalosNodeReconciler) drainAndDeleteNode(ctx context.Context, node *v1al
 	}
 
 	appmetrics.NodeDrainTotal.WithLabelValues("success", node.Spec.ClusterRef).Inc()
-	l.Info("Node drained and deleted from Kubernetes", "name", nodeName, "ip", node.Spec.NodeIP)
+	l.Info("node drained and deleted from Kubernetes", "k8sNode", nodeName, "ip", node.Spec.NodeIP)
 	return true, ctrl.Result{}, nil
 }
 
@@ -196,7 +196,7 @@ func drainPods(ctx context.Context, c kubernetes.Interface, nodeName, cluster st
 			if apierrors.IsTooManyRequests(err) {
 				// A PodDisruptionBudget is blocking this eviction — log and continue.
 				l.V(1).Info("pod eviction blocked by PodDisruptionBudget, will retry",
-					"pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name), "node", nodeName)
+					"pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name), "k8sNode", nodeName)
 				continue
 			}
 			if err != nil && !apierrors.IsNotFound(err) {
@@ -207,7 +207,7 @@ func drainPods(ctx context.Context, c kubernetes.Interface, nodeName, cluster st
 		if pending == 0 {
 			return nil
 		}
-		l.V(1).Info("waiting for pods to terminate", "node", nodeName, "pending", pending)
+		l.V(1).Info("waiting for pods to terminate", "k8sNode", nodeName, "pending", pending)
 
 		select {
 		case <-ctx.Done():

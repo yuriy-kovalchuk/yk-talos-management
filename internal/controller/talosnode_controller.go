@@ -53,7 +53,7 @@ func (r *TalosNodeReconciler) setError(ctx context.Context, node *v1alpha1.Talos
 	node.Status.RetryCount++
 	node.Status.Message = err.Error()
 	delay := config.GetRetryDelay(node.Status.RetryCount)
-	l.Error(err, "apply config failed", "ip", node.Spec.NodeIP, "attempt", node.Status.RetryCount, "requeueAfter", delay)
+	l.Error(err, "apply config failed", "ip", node.Spec.NodeIP, "attempt", node.Status.RetryCount, "requeueAfter", delay.String())
 	appmetrics.RecordNodePhase(node.Name, node.Namespace, node.Spec.ClusterRef, string(node.Spec.Role), node.Spec.NodeIP, string(fromPhase), string(v1alpha1.TalosNodePhaseError))
 	appmetrics.ConfigApplyTotal.WithLabelValues(string(node.Spec.Role), "error", node.Spec.ClusterRef).Inc()
 	emitEvent(r.Recorder, node, corev1.EventTypeWarning, "ApplyFailed", err.Error())
@@ -71,7 +71,7 @@ func (r *TalosNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	l.V(1).Info("Reconciling TalosNode", "name", node.Name, "ip", node.Spec.NodeIP, "generation", node.Generation)
+	l.V(1).Info("reconciling TalosNode", "ip", node.Spec.NodeIP, "generation", node.Generation)
 	start := time.Now()
 	defer func() { l.V(1).Info("reconcile done", "duration", time.Since(start)) }()
 	appmetrics.RecordNodePhase(node.Name, node.Namespace, node.Spec.ClusterRef, string(node.Spec.Role), node.Spec.NodeIP, string(node.Status.Phase), string(node.Status.Phase))
@@ -111,7 +111,7 @@ func (r *TalosNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if driftEnabled(&node) {
 			return r.checkDrift(ctx, &node)
 		}
-		l.Info("Node up-to-date, drift detection disabled", "generation", node.Generation)
+		l.Info("node up-to-date, drift detection disabled", "generation", node.Generation)
 		return ctrl.Result{}, nil
 	}
 
@@ -122,7 +122,7 @@ func (r *TalosNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.setError(ctx, &node, err)
 	}
 
-	l.Info("Node configured", "ip", node.Spec.NodeIP)
+	l.Info("node configured", "ip", node.Spec.NodeIP)
 	emitEvent(r.Recorder, &node, corev1.EventTypeNormal, "Applied", "Machine configuration applied successfully")
 	if driftEnabled(&node) {
 		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
@@ -172,7 +172,7 @@ func (r *TalosNodeReconciler) checkDrift(ctx context.Context, node *v1alpha1.Tal
 
 	conn, err := r.Talos.Dial(ctx, talosconfigBytes, node.Spec.NodeIP)
 	if err != nil {
-		l.Info("drift check: node unreachable, will retry", "ip", node.Spec.NodeIP, "requeueAfter", driftCheckInterval)
+		l.Info("drift check: node unreachable, will retry", "ip", node.Spec.NodeIP, "requeueAfter", driftCheckInterval.String())
 		appmetrics.DriftCheckTotal.WithLabelValues("unreachable", node.Spec.ClusterRef, node.Name).Inc()
 		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
 	}
@@ -180,7 +180,7 @@ func (r *TalosNodeReconciler) checkDrift(ctx context.Context, node *v1alpha1.Tal
 
 	remoteBytes, err := conn.GetMachineConfig(ctx, node.Spec.NodeIP)
 	if err != nil {
-		l.Error(err, "drift check: could not read remote config, will retry", "ip", node.Spec.NodeIP, "requeueAfter", driftCheckInterval)
+		l.Error(err, "drift check: could not read remote config, will retry", "ip", node.Spec.NodeIP, "requeueAfter", driftCheckInterval.String())
 		appmetrics.DriftCheckTotal.WithLabelValues("error", node.Spec.ClusterRef, node.Name).Inc()
 		return ctrl.Result{RequeueAfter: driftCheckInterval}, nil
 	}
@@ -236,6 +236,8 @@ func (r *TalosNodeReconciler) handleDeletion(ctx context.Context, node *v1alpha1
 		return ctrl.Result{}, nil
 	}
 
+	l := log.FromContext(ctx)
+
 	// Transition to Deleting on first entry so the phase reflects progress during
 	// what can be a multi-minute drain + etcd-leave sequence.
 	if node.Status.Phase != v1alpha1.TalosNodePhaseDeleting {
@@ -256,16 +258,14 @@ func (r *TalosNodeReconciler) handleDeletion(ctx context.Context, node *v1alpha1
 			return ctrl.Result{}, fmt.Errorf("check last control plane: %w", err)
 		}
 		if last {
-			log.FromContext(ctx).Info(
-				"deletion blocked: this is the last ControlPlane node — add a replacement CP first, or delete the TalosCluster to tear down the entire cluster",
-				"name", node.Name, "cluster", node.Spec.ClusterRef)
+			l.Info("deletion blocked: this is the last ControlPlane node — add a replacement CP first, or delete the TalosCluster to tear down the entire cluster",
+				"cluster", node.Spec.ClusterRef)
 			return ctrl.Result{RequeueAfter: deletionGuardRequeueDelay}, nil
 		}
 	}
 
 	if skipDrain(node) {
-		log.FromContext(ctx).V(1).Info("drain skipped", "name", node.Name,
-			"reason", drainSkipReason(node))
+		l.V(1).Info("drain skipped", "reason", drainSkipReason(node))
 		appmetrics.NodeDrainTotal.WithLabelValues("skipped", node.Spec.ClusterRef).Inc()
 	} else {
 		done, result, err := r.drainAndDeleteNode(ctx, node)
@@ -288,7 +288,6 @@ func (r *TalosNodeReconciler) handleDeletion(ctx context.Context, node *v1alpha1
 	// Best-effort — failure is logged and emits an event but never blocks deletion.
 	// graceful=false: node may already be degraded after drain + etcd leave.
 	if node.Spec.ResetOnDelete {
-		l := log.FromContext(ctx)
 		emitEvent(r.Recorder, node, corev1.EventTypeNormal, "NodeResetTriggered", "Resetting node before cleanup (spec.resetOnDelete)")
 		if err := r.tryReset(ctx, node, false); err != nil {
 			l.Error(err, "reset-on-delete failed, proceeding with cleanup", "ip", node.Spec.NodeIP)
@@ -313,7 +312,6 @@ func (r *TalosNodeReconciler) handleDeletion(ctx context.Context, node *v1alpha1
 	// update the kubeconfig Secret so its server URL points to a surviving endpoint.
 	// Both steps are best-effort — failures are logged but do not block finalizer removal.
 	if node.Spec.Role == v1alpha1.TalosNodeRoleControlPlane {
-		l := log.FromContext(ctx)
 		if err := r.removeEndpointFromCluster(ctx, node); err != nil {
 			l.Error(err, "could not remove endpoint from TalosCluster, proceeding with cleanup", "ip", node.Spec.NodeIP)
 		} else {
@@ -330,7 +328,7 @@ func (r *TalosNodeReconciler) handleDeletion(ctx context.Context, node *v1alpha1
 	if err := r.Update(ctx, node); err != nil {
 		return ctrl.Result{}, err
 	}
-	log.FromContext(ctx).Info("Node cleaned up", "name", node.Name)
+	l.Info("node cleaned up")
 	return ctrl.Result{}, nil
 }
 
@@ -425,7 +423,7 @@ func (r *TalosNodeReconciler) handleEtcdLeave(ctx context.Context, node *v1alpha
 	if node.Status.DeletionAttempts < etcdLeaveMaxAttempts {
 		if err := r.tryEtcdLeave(ctx, node.Spec.NodeIP, talosconfig); err != nil {
 			node.Status.DeletionAttempts++
-			l.Error(err, "etcd leave failed, will retry", "ip", node.Spec.NodeIP, "attempt", node.Status.DeletionAttempts, "requeueAfter", etcdLeaveRetryDelay)
+			l.Error(err, "etcd leave failed, will retry", "ip", node.Spec.NodeIP, "attempt", node.Status.DeletionAttempts, "requeueAfter", etcdLeaveRetryDelay.String())
 			appmetrics.EtcdLeaveTotal.WithLabelValues("failed", node.Spec.ClusterRef).Inc()
 			if updateErr := r.Status().Update(ctx, node); updateErr != nil {
 				l.Error(updateErr, "update deletion attempts status")

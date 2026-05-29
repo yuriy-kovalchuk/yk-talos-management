@@ -27,6 +27,7 @@ spec:
           args:
             - --leader-elect
             - --zap-log-level=1
+            - --zap-encoder=json
           env:
             - name: POD_NAMESPACE
               valueFrom:

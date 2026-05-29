@@ -56,7 +56,7 @@ func Run() error {
 		return fmt.Errorf("add readyz check: %w", err)
 	}
 
-	log.Log.Info("YK Talos Management started",
+	log.Log.Info("yk-talos-management started",
 		"version", version.Version,
 		"commit", version.Commit,
 		"buildDate", version.BuildDate,

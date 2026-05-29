@@ -52,7 +52,7 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	l.V(1).Info("Reconciling TalosClusterBootstrap", "name", bootstrap.Name, "generation", bootstrap.Generation)
+	l.V(1).Info("reconciling TalosClusterBootstrap", "generation", bootstrap.Generation)
 	start := time.Now()
 	defer func() { l.V(1).Info("reconcile done", "duration", time.Since(start)) }()
 	appmetrics.RecordBootstrapPhase(bootstrap.Spec.ClusterRef, bootstrap.Namespace, string(bootstrap.Status.Phase), string(bootstrap.Status.Phase))
@@ -66,7 +66,7 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	if isBootstrapUpToDate(&bootstrap) {
-		l.V(1).Info("Bootstrap complete, skipping", "generation", bootstrap.Generation)
+		l.V(1).Info("bootstrap complete, skipping", "generation", bootstrap.Generation)
 		return ctrl.Result{}, nil
 	}
 
@@ -171,7 +171,7 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		bootstrap.Status.RetryCount++
 		delay := config.GetRetryDelay(bootstrap.Status.RetryCount)
-		l.Error(err, "get kubeconfig failed", "endpoint", dialedTo, "attempt", bootstrap.Status.RetryCount, "requeueAfter", delay)
+		l.Error(err, "get kubeconfig failed", "endpoint", dialedTo, "attempt", bootstrap.Status.RetryCount, "requeueAfter", delay.String())
 		appmetrics.RecordBootstrapPhase(bootstrap.Spec.ClusterRef, bootstrap.Namespace, string(v1alpha1.TalosClusterBootstrapPhaseBootstrapping), string(v1alpha1.TalosClusterBootstrapPhaseWaitingForKubeconfig))
 		bootstrap.Status.Phase = v1alpha1.TalosClusterBootstrapPhaseWaitingForKubeconfig
 		talos.SetConditionStatus(&bootstrap.Status.Conditions,
@@ -220,7 +220,7 @@ func (r *TalosClusterBootstrapReconciler) waitForAPIServer(ctx context.Context, 
 	}
 	if apiErr != nil {
 		l.Info("kubernetes API server not yet reachable, will retry",
-			"requeueAfter", apiServerCheckDelay, "err", apiErr)
+			"requeueAfter", apiServerCheckDelay.String(), "err", apiErr)
 		appmetrics.RecordBootstrapPhase(bootstrap.Spec.ClusterRef, bootstrap.Namespace,
 			string(bootstrap.Status.Phase), string(v1alpha1.TalosClusterBootstrapPhaseWaitingForAPIServer))
 		bootstrap.Status.Phase = v1alpha1.TalosClusterBootstrapPhaseWaitingForAPIServer
@@ -254,7 +254,7 @@ func (r *TalosClusterBootstrapReconciler) waitForAPIServer(ctx context.Context, 
 		time.Since(bootstrap.CreationTimestamp.Time).Seconds())
 	emitEvent(r.Recorder, bootstrap, corev1.EventTypeNormal, "Completed",
 		"Bootstrap complete; kubeconfig stored and API server reachable")
-	l.Info("Bootstrap complete")
+	l.Info("bootstrap complete")
 	return ctrl.Result{}, nil
 }
 
@@ -285,7 +285,7 @@ func (r *TalosClusterBootstrapReconciler) waitForReadyNodes(ctx context.Context,
 	if err := r.Status().Update(ctx, bootstrap); err != nil {
 		return ctrl.Result{}, false, fmt.Errorf("update status: %w", err)
 	}
-	log.FromContext(ctx).Info("waiting for ready control plane node", "requeueAfter", nodeReadyDelay)
+	log.FromContext(ctx).Info("waiting for ready control plane node", "requeueAfter", nodeReadyDelay.String())
 	return ctrl.Result{RequeueAfter: nodeReadyDelay}, false, nil
 }
 
@@ -313,7 +313,7 @@ func (r *TalosClusterBootstrapReconciler) handleDeletion(ctx context.Context, bo
 	if err := r.Update(ctx, bootstrap); err != nil {
 		return ctrl.Result{}, err
 	}
-	l.Info("Bootstrap cleaned up", "name", bootstrap.Name)
+	l.Info("bootstrap cleaned up")
 	return ctrl.Result{}, nil
 }
 
