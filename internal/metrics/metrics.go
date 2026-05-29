@@ -73,6 +73,24 @@ var (
 		Help:    "End-to-end duration of a TalosClusterBootstrap from object creation to completion.",
 		Buckets: []float64{5, 10, 30, 60, 120, 300, 600},
 	}, []string{"cluster"})
+
+	// NodeDrainTotal counts node drain outcomes (cordon + pod eviction + node deletion) by result.
+	NodeDrainTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "talos_node_drain_total",
+		Help: "Total node drain operations by result (success, skipped, timeout, error).",
+	}, []string{"result", "cluster"})
+
+	// NodeUpgradeTotal counts Talos node upgrade outcomes by result.
+	NodeUpgradeTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "talos_node_upgrade_total",
+		Help: "Total Talos node upgrade operations by result (success, error, skipped, blocked).",
+	}, []string{"result", "cluster"})
+
+	// ExtensionSchematicTotal counts Image Factory schematic operations by result.
+	ExtensionSchematicTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "talos_extension_schematic_total",
+		Help: "Total Image Factory schematic operations by result (success, error, cached).",
+	}, []string{"result", "cluster"})
 )
 
 func init() {
@@ -88,7 +106,19 @@ func init() {
 		APICallDuration,
 		SecretOperationsTotal,
 		BootstrapDuration,
+		NodeDrainTotal,
+		NodeUpgradeTotal,
+		ExtensionSchematicTotal,
 	)
+}
+
+// ResultLabel returns "success" when err is nil, "error" otherwise.
+// Shared by all packages that label Prometheus counters/histograms by outcome.
+func ResultLabel(err error) string {
+	if err != nil {
+		return "error"
+	}
+	return "success"
 }
 
 // RecordNodePhase transitions the NodePhase gauge from the previous phase to the new one.

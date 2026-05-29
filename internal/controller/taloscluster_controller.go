@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	"github.com/yuriy-kovalchuk/yk-talos-management/internal/config"
 	appmetrics "github.com/yuriy-kovalchuk/yk-talos-management/internal/metrics"
 	"github.com/yuriy-kovalchuk/yk-talos-management/internal/talos"
 )
@@ -39,7 +40,7 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	l.V(1).Info("Reconciling TalosCluster", "name", cluster.Name, "generation", cluster.Generation)
+	l.V(1).Info("reconciling TalosCluster", "generation", cluster.Generation)
 	start := time.Now()
 	defer func() { l.V(1).Info("reconcile done", "duration", time.Since(start)) }()
 	appmetrics.RecordClusterPhase(cluster.Name, cluster.Namespace, string(cluster.Status.Phase), string(cluster.Status.Phase))
@@ -48,13 +49,12 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return r.handleDeletion(ctx, &cluster)
 	}
 
-	talos.AddFinalizer(&cluster.Finalizers, talos.FinalizerCleanup)
-	if err := r.Update(ctx, &cluster); err != nil {
-		return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
+	if err := ensureFinalizer(ctx, r.Client, &cluster); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	if isUpToDate(&cluster) {
-		l.V(1).Info("Cluster up-to-date, skipping", "generation", cluster.Generation)
+		l.V(1).Info("cluster up-to-date, skipping", "generation", cluster.Generation)
 		return ctrl.Result{}, nil
 	}
 
@@ -62,16 +62,10 @@ func (r *TalosClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if talos.IsContextCancelled(err) {
 			return ctrl.Result{}, nil
 		}
-		appmetrics.RecordClusterPhase(cluster.Name, cluster.Namespace, string(v1alpha1.TalosPhaseProvisioning), string(v1alpha1.TalosPhaseError))
-		cluster.Status.Phase = v1alpha1.TalosPhaseError
-		emitEvent(r.Recorder, &cluster, corev1.EventTypeWarning, "ProvisionFailed", err.Error())
-		if updateErr := r.Status().Update(ctx, &cluster); updateErr != nil {
-			l.Error(updateErr, "failed to update error status")
-		}
-		return ctrl.Result{}, fmt.Errorf("provision: %w", err)
+		return r.setError(ctx, &cluster, fmt.Errorf("provision: %w", err))
 	}
 
-	l.Info("Cluster provisioned", "phase", cluster.Status.Phase)
+	l.Info("cluster provisioned", "phase", cluster.Status.Phase)
 	emitEvent(r.Recorder, &cluster, corev1.EventTypeNormal, "Provisioned", "Cluster configs and secrets generated successfully")
 	return ctrl.Result{}, nil
 }
@@ -81,7 +75,30 @@ func (r *TalosClusterReconciler) handleDeletion(ctx context.Context, cluster *v1
 		return ctrl.Result{}, nil
 	}
 
-	log.FromContext(ctx).Info("Cleaning up cluster resources", "name", cluster.Name)
+	l := log.FromContext(ctx)
+
+	// Block deletion while TalosNode objects still reference this cluster.
+	// Deleting the cluster first would yank the talosconfig and kubeconfig secrets
+	// out from under them, orphan their finalizers, and — for single-CP clusters —
+	// permanently block the TalosNode deletion (last-CP guard fires, no cluster
+	// to look up, node is stuck forever). Delete the nodes first.
+	count, err := r.activeNodeCount(ctx, cluster)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("count active nodes: %w", err)
+	}
+	if count > 0 {
+		l.Info("deletion blocked: TalosNode objects still reference this cluster; delete them first",
+			"activeNodes", count)
+		appmetrics.RecordClusterPhase(cluster.Name, cluster.Namespace,
+			string(cluster.Status.Phase), string(v1alpha1.TalosPhaseDeleting))
+		cluster.Status.Phase = v1alpha1.TalosPhaseDeleting
+		if updateErr := r.Status().Update(ctx, cluster); updateErr != nil {
+			l.Error(updateErr, "update deleting status")
+		}
+		return ctrl.Result{RequeueAfter: deletionGuardRequeueDelay}, nil
+	}
+
+	l.Info("cleaning up cluster resources")
 
 	sm := talos.NewSecretManager(r.Client, r.Scheme, cluster.Name, cluster.UID)
 	if err := sm.DeleteMultiple(ctx, cluster.Namespace,
@@ -95,6 +112,22 @@ func (r *TalosClusterReconciler) handleDeletion(ctx context.Context, cluster *v1
 
 	cluster.Finalizers = talos.RemoveFinalizer(cluster.Finalizers, talos.FinalizerCleanup)
 	return ctrl.Result{}, r.Update(ctx, cluster)
+}
+
+// activeNodeCount returns the number of TalosNode objects that reference this cluster
+// and have not yet been marked for deletion. Used to block premature cluster teardown.
+func (r *TalosClusterReconciler) activeNodeCount(ctx context.Context, cluster *v1alpha1.TalosCluster) (int, error) {
+	var nodes v1alpha1.TalosNodeList
+	if err := r.List(ctx, &nodes, client.InNamespace(cluster.Namespace)); err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, n := range nodes.Items {
+		if n.Spec.ClusterRef == cluster.Name && n.DeletionTimestamp == nil {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // isUpToDate returns true when the cluster is already fully provisioned and the spec hasn't changed.
@@ -138,7 +171,7 @@ func (r *TalosClusterReconciler) provision(ctx context.Context, cluster *v1alpha
 		return fmt.Errorf("store secrets: %w", err)
 	}
 
-	configs, err := talos.GenConfig(cluster.Spec.ClusterName, cluster.Spec.Endpoints, cluster.Spec.TalosVersion, bundle)
+	configs, err := talos.GenConfig(cluster.Spec.ClusterName, cluster.Spec.Endpoints, cluster.Spec.TalosVersion, bundle, cluster.Spec.KubernetesVersion)
 	if err != nil {
 		return err
 	}
@@ -157,6 +190,7 @@ func (r *TalosClusterReconciler) provision(ctx context.Context, cluster *v1alpha
 	}
 
 	cluster.Status.Phase = v1alpha1.TalosPhaseReady
+	cluster.Status.RetryCount = 0
 	appmetrics.RecordClusterPhase(cluster.Name, cluster.Namespace, string(v1alpha1.TalosPhaseProvisioning), string(v1alpha1.TalosPhaseReady))
 	now := metav1.Now()
 	cluster.Status.LastUpdateTime = &now
@@ -165,6 +199,18 @@ func (r *TalosClusterReconciler) provision(ctx context.Context, cluster *v1alpha
 	talos.SetConditionStatus(&cluster.Status.Conditions,
 		v1alpha1.TalosClusterConditionConfigsGenerated, metav1.ConditionTrue, "Generated", "Cluster configs generated successfully")
 	return r.Status().Update(ctx, cluster)
+}
+
+func (r *TalosClusterReconciler) setError(ctx context.Context, cluster *v1alpha1.TalosCluster, err error) (ctrl.Result, error) {
+	cluster.Status.RetryCount++
+	delay := config.GetRetryDelay(cluster.Status.RetryCount)
+	appmetrics.RecordClusterPhase(cluster.Name, cluster.Namespace, string(cluster.Status.Phase), string(v1alpha1.TalosPhaseError))
+	cluster.Status.Phase = v1alpha1.TalosPhaseError
+	emitEvent(r.Recorder, cluster, corev1.EventTypeWarning, "ProvisionFailed", err.Error())
+	if updateErr := r.Status().Update(ctx, cluster); updateErr != nil {
+		log.FromContext(ctx).Error(updateErr, "update error status")
+	}
+	return ctrl.Result{RequeueAfter: delay}, nil
 }
 
 func (r *TalosClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {

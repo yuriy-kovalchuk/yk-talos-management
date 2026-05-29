@@ -25,7 +25,6 @@ resources:
 ports:
   metrics: 8080
   health: 8081
-  webhook: 9443
 
 metrics:
   # Expose a Service for Prometheus scraping.
@@ -56,17 +55,6 @@ logLevel: 1
 leaderElection:
   enabled: true
   id: yk-talos-management.lock
-
-# Webhooks require TLS. Disable when running locally or without cert-manager.
-webhooks:
-  enabled: false
-  # cert-manager Certificate resource for webhook TLS.
-  # Set certManager.enabled=true to have the chart create it automatically.
-  certManager:
-    enabled: false
-    issuerRef:
-      name: selfsigned-issuer
-      kind: ClusterIssuer
 
 # Pod scheduling controls.
 nodeSelector: {}

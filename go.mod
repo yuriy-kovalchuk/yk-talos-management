@@ -3,6 +3,7 @@ module github.com/yuriy-kovalchuk/yk-talos-management
 go 1.26.2
 
 require (
+	github.com/blang/semver/v4 v4.0.0
 	github.com/cosi-project/runtime v1.16.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/siderolabs/talos/pkg/machinery v1.13.2
@@ -25,7 +26,6 @@ require (
 	github.com/adrg/xdg v0.5.3 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect

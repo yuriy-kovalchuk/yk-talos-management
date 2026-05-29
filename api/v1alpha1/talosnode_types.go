@@ -3,7 +3,6 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 )
 
 type TalosNodePhase string
@@ -13,6 +12,14 @@ const (
 	TalosNodePhaseApplying TalosNodePhase = "Applying"
 	TalosNodePhaseReady    TalosNodePhase = "Ready"
 	TalosNodePhaseError    TalosNodePhase = "Error"
+	// TalosNodePhaseDeleting is set as soon as the deletion finalizer starts
+	// processing — drain, etcd leave, and config cleanup. The phase persists
+	// until the finalizer is removed and the object is gone.
+	TalosNodePhaseDeleting TalosNodePhase = "Deleting"
+	// TalosNodePhaseUpgrading is set when an upgrade has been initiated via the
+	// talos.yuriykovalchuk.dev/upgrade annotation. The phase persists until the
+	// node comes back online running the expected Talos version.
+	TalosNodePhaseUpgrading TalosNodePhase = "Upgrading"
 )
 
 type TalosNodeRole string
@@ -22,8 +29,16 @@ const (
 	TalosNodeRoleWorker       TalosNodeRole = "Worker"
 )
 
-// Condition type constant as a plain string — no type casting needed at call sites.
-const TalosNodeConditionConfigApplied = "ConfigApplied"
+// Condition type constants — plain strings, no type casting needed at call sites.
+const (
+	TalosNodeConditionConfigApplied = "ConfigApplied"
+	// TalosNodeConditionTalosVersionUpToDate is set to True after a successful upgrade.
+	// Tracks the installed Talos version separately from the machine config state.
+	TalosNodeConditionTalosVersionUpToDate = "TalosVersionUpToDate"
+	// TalosNodeConditionExtensionsUpToDate is set to True after the running
+	// system extensions match spec.systemExtensions following a successful upgrade.
+	TalosNodeConditionExtensionsUpToDate = "ExtensionsUpToDate"
+)
 
 type TalosNodeSpec struct {
 	// +kubebuilder:validation:Required
@@ -55,6 +70,42 @@ type TalosNodeSpec struct {
 	// and re-applies if it diverges from the desired state. Set to false for nodes
 	// that are frequently offline (e.g. homelab nodes powered down overnight).
 	DriftDetection *bool `json:"driftDetection,omitempty"`
+
+	// When true, skip Kubernetes node drain (cordon + pod eviction) during node removal.
+	// Use for nodes that are already unreachable or when fast removal is required.
+	// +optional
+	// +kubebuilder:default=false
+	SkipDrain bool `json:"skipDrain,omitempty"`
+
+	// Maximum time to wait for all pods to be evicted during node drain.
+	// Defaults to 5 minutes.
+	// +optional
+	DrainTimeout *metav1.Duration `json:"drainTimeout,omitempty"`
+
+	// When true, the operator wipes the node's ephemeral state and reboots it into
+	// maintenance mode as part of the deletion sequence (after etcd leave, before the
+	// config secret is removed). Useful when the node hardware will be repurposed —
+	// the next TalosNode pointing at the same IP will apply a fresh config.
+	// Best-effort: a reset failure is logged and emits an event but never blocks deletion.
+	// +optional
+	// +kubebuilder:default=false
+	ResetOnDelete bool `json:"resetOnDelete,omitempty"`
+
+	// Desired Talos OS version to run on this node (e.g. "v1.13.2").
+	// When set and different from status.currentTalosVersion, the operator triggers
+	// an in-place upgrade automatically. When spec.systemExtensions is also set,
+	// the factory-built image for the current schematic is used so extensions are
+	// preserved across version upgrades. Downgrades are rejected.
+	// +optional
+	TalosVersion string `json:"talosVersion,omitempty"`
+
+	// Talos system extensions to install on this node via the Talos Image Factory.
+	// Extensions are hardware-specific — nodes in the same cluster can have different
+	// extension sets. Changing this list triggers an upgrade to a new factory-built
+	// image at the current (or newly specified) Talos version.
+	// Extension names follow the format "siderolabs/<name>" (e.g. "siderolabs/iscsi-tools").
+	// +optional
+	SystemExtensions []string `json:"systemExtensions,omitempty"`
 }
 
 type TalosNodeStatus struct {
@@ -66,6 +117,17 @@ type TalosNodeStatus struct {
 
 	// Number of failed etcd leave attempts during deletion.
 	DeletionAttempts int32 `json:"deletionAttempts,omitempty"`
+
+	// Talos version currently running on this node.
+	// Populated after a successful upgrade via the talos.yuriykovalchuk.dev/upgrade annotation
+	// or spec.talosVersion.
+	// +optional
+	CurrentTalosVersion string `json:"currentTalosVersion,omitempty"`
+
+	// System extensions currently installed on the node.
+	// Populated after a successful upgrade that included spec.systemExtensions.
+	// +optional
+	InstalledExtensions []string `json:"installedExtensions,omitempty"`
 
 	CommonStatus `json:",inline"`
 }
@@ -85,12 +147,8 @@ type TalosNode struct {
 	Status TalosNodeStatus `json:"status,omitempty"`
 }
 
-func (t *TalosNode) DeepCopyObject() runtime.Object { return t }
-
 type TalosNodeList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []TalosNode `json:"items"`
 }
-
-func (t *TalosNodeList) DeepCopyObject() runtime.Object { return t }

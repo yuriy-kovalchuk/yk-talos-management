@@ -1,0 +1,20 @@
+# Minimal kubectl + talosctl shell image for the dev-shell pod.
+# Built locally and loaded into kind — no external registry needed.
+#
+# Downloads both binaries from their official release URLs onto a bare alpine base.
+# Rebuild via `make tools-deploy` to change either version.
+ARG KUBECTL_VERSION=v1.32.0
+ARG TALOS_VERSION=v1.13.0
+ARG TARGETARCH=amd64
+
+FROM alpine:3
+ARG KUBECTL_VERSION
+ARG TALOS_VERSION
+ARG TARGETARCH
+RUN apk add --no-cache ca-certificates && \
+    wget -qO /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" && \
+    chmod +x /usr/local/bin/kubectl && \
+    wget -qO /usr/local/bin/talosctl \
+      "https://github.com/siderolabs/talos/releases/download/${TALOS_VERSION}/talosctl-linux-${TARGETARCH}" && \
+    chmod +x /usr/local/bin/talosctl

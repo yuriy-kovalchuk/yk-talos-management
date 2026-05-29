@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -50,15 +51,17 @@ func (sm *SecretManager) Create(ctx context.Context, name, namespace, key, conte
 }
 
 func (sm *SecretManager) CreateOrUpdate(ctx context.Context, name, namespace, key, content string, secretType corev1.SecretType) error {
-	secret := &corev1.Secret{}
-	if err := sm.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err != nil {
-		if apierrors.IsNotFound(err) {
-			return sm.Create(ctx, name, namespace, key, content, secretType)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		secret := &corev1.Secret{}
+		if err := sm.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				return sm.Create(ctx, name, namespace, key, content, secretType)
+			}
+			return err
 		}
-		return err
-	}
-	secret.Data[key] = []byte(content)
-	return sm.Client.Update(ctx, secret)
+		secret.Data[key] = []byte(content)
+		return sm.Client.Update(ctx, secret)
+	})
 }
 
 func (sm *SecretManager) Delete(ctx context.Context, name, namespace string) error {

@@ -20,6 +20,3 @@ func IsContextCancelled(err error) bool {
 	return false
 }
 
-func IsCancelled(ctx context.Context) bool {
-	return ctx.Err() != nil
-}

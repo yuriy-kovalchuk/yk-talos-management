@@ -6,9 +6,24 @@
 # The node role (controlplane/worker) is determined by your TalosNode CRD, not here.
 #
 # Usage:
-#   hack/talos-nodes.sh up    — start one node (TALOS_NODE_NAME)
-#   hack/talos-nodes.sh down  — stop and remove one node (TALOS_NODE_NAME)
-#   hack/talos-nodes.sh ips   — list IPs of all running nodes
+#   hack/talos-nodes.sh up   — start one node (TALOS_NODE_NAME)
+#   hack/talos-nodes.sh down — stop and remove one node (TALOS_NODE_NAME)
+#   hack/talos-nodes.sh ips  — list kind-network IPs (use these in spec.nodeIP)
+#
+# Network design:
+#   Each container is connected to two Docker networks:
+#     kind        — provides reachability from the operator pod running inside the
+#                   kind cluster. Use the IP on this network as spec.nodeIP in your
+#                   TalosNode manifests; it is what the operator dials for Talos API
+#                   calls (config apply, drift detection, hostname resolution, etc.).
+#     talos-test  — dedicated network for Talos-to-Talos traffic (etcd peer URLs,
+#                   Kubernetes API server clustering). Also used by talos-clean to
+#                   identify which containers belong to this test setup.
+#
+#   The node hostname (--hostname flag) is what kubelet registers as the Kubernetes
+#   Node name. The operator uses the Talos COSI HostnameStatus API to retrieve this
+#   hostname during deletion, so there is no requirement for spec.nodeIP to match
+#   any particular network interface.
 #
 # Environment variables (all optional, defaults match Makefile):
 #   TALOS_VERSION        Talos image tag             (default: v1.13.0)
@@ -26,7 +41,8 @@ KIND_NETWORK="kind"
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
-# Returns the container's IP on the kind network — reachable by the operator pod running inside kind.
+# Returns the container's IP on the kind network.
+# This is the IP the operator uses to reach the Talos API — use it in spec.nodeIP.
 node_ip() {
   docker inspect "$1" \
     --format '{{with index .NetworkSettings.Networks "kind"}}{{.IPAddress}}{{end}}' 2>/dev/null || true
@@ -54,9 +70,9 @@ cmd_up() {
     --mount type=volume,destination=/usr/libexec/kubernetes \
     --mount type=volume,destination=/opt \
     -e PLATFORM=container \
-    --network "${NETWORK}" \
+    --network "${KIND_NETWORK}" \
     "${TALOS_IMAGE}" >/dev/null
-  docker network connect "${KIND_NETWORK}" "${NODE_NAME}"
+  docker network connect "${NETWORK}" "${NODE_NAME}"
 
   local ip
   ip=$(node_ip "${NODE_NAME}")
@@ -76,7 +92,7 @@ cmd_down() {
 }
 
 cmd_ips() {
-  echo "Talos node IPs on kind network:"
+  echo "Talos node IPs on kind network (use these in spec.nodeIP):"
   local found=0
   while IFS= read -r name; do
     local ip

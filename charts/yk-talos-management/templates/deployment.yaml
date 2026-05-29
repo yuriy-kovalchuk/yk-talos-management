@@ -35,15 +35,12 @@ spec:
             {{- if .Values.logLevel }}
             - --zap-log-level={{ .Values.logLevel }}
             {{- end }}
+            - --zap-encoder=json
           env:
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            {{- if not .Values.webhooks.enabled }}
-            - name: DISABLE_WEBHOOKS
-              value: "true"
-            {{- end }}
           ports:
             - name: metrics
               containerPort: {{ .Values.ports.metrics }}
@@ -51,11 +48,6 @@ spec:
             - name: health
               containerPort: {{ .Values.ports.health }}
               protocol: TCP
-            {{- if .Values.webhooks.enabled }}
-            - name: webhook
-              containerPort: {{ .Values.ports.webhook }}
-              protocol: TCP
-            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -74,18 +66,6 @@ spec:
             timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if .Values.webhooks.enabled }}
-          volumeMounts:
-            - name: webhook-certs
-              mountPath: /tmp/k8s-webhook-server/serving-certs
-              readOnly: true
-          {{- end }}
-      {{- if .Values.webhooks.enabled }}
-      volumes:
-        - name: webhook-certs
-          secret:
-            secretName: {{ include "yk-talos-management.fullname" . }}-webhook-certs
-      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

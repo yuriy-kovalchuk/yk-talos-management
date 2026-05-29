@@ -33,8 +33,6 @@ TalosClusterBootstrap → etcd bootstrapped → kubeconfig stored in secret
 - Kubernetes 1.26+
 - [Helm](https://helm.sh/) 3.10+
 
-> Webhooks are disabled by default. [cert-manager](https://cert-manager.io/) is only needed if you enable them.
-
 ### Install from GHCR
 
 ```bash
@@ -59,8 +57,6 @@ helm upgrade --install yk-talos-management ./charts/yk-talos-management \
 kubectl -n yk-talos-management-system get pods
 ```
 
-The pod should reach `Running` status within a few seconds.
-
 ### Uninstall
 
 ```bash
@@ -78,52 +74,22 @@ kubectl delete namespace yk-talos-management-system
 
 ---
 
-## Local development setup
-
-For a full end-to-end local setup — kind cluster, ephemeral Talos nodes in Docker, optional Prometheus + Grafana — see **[docs/local-testing.md](docs/local-testing.md)**.
-
-Quick path:
-
-```bash
-make kind-up
-make kind-install-crds
-make talos-up TALOS_NODE_NAME=cp1
-make run
-```
-
----
-
 ## Deploying a Talos cluster
 
 Edit the example manifests in `examples/defaults/` to match your environment, then apply them in order.
 
-### Step 1 — Define the cluster
-
-```yaml
-apiVersion: talos.yuriykovalchuk.dev/v1alpha1
-kind: TalosCluster
-metadata:
-  name: my-cluster
-  namespace: default
-spec:
-  clusterName: my-cluster
-  # List all control plane IPs. The first is used as the Kubernetes API endpoint;
-  # all are embedded in the generated talosconfig for HA access.
-  endpoints:
-    - 10.0.2.100
-    - 10.0.2.101
-    - 10.0.2.102
-  talosVersion: v1.13
-```
+### Step 1: Define the cluster
 
 ```bash
 kubectl apply -f examples/defaults/00-talos-cluster.yaml
 kubectl get taloscluster my-cluster -w
 ```
 
-Wait for `status.phase=Ready`. This generates four secrets: `my-cluster-secrets`, `my-cluster-controlplane`, `my-cluster-worker`, `my-cluster-talosconfig`.
+Wait for `status.phase=Ready`.
 
-### Step 2 — Declare the nodes
+### Step 2: Declare the nodes
+
+> Nodes must be booted from the Talos ISO and sitting in maintenance mode before this step.
 
 ```bash
 kubectl apply -f examples/defaults/01-talos-controlplane-nodes.yaml
@@ -133,9 +99,7 @@ kubectl get talosnodes -w
 
 Wait for all nodes to reach `status.phase=Ready`.
 
-> Nodes must be booted from the Talos ISO and sitting in maintenance mode before this step.
-
-### Step 3 — Bootstrap
+### Step 3: Bootstrap
 
 ```bash
 kubectl apply -f examples/defaults/03-talos-cluster-bootstrap.yaml
@@ -155,62 +119,21 @@ kubectl --kubeconfig=kubeconfig get nodes
 
 ---
 
-## Node patches
+## Local development
 
-`spec.patches` on `TalosNode` is a list of YAML strings applied on top of the base machine config before it is sent to the node.
+For a full local setup with kind and ephemeral Talos Docker nodes, see **[docs/local-testing.md](docs/local-testing.md)**.
 
-### Machine config patches
-
-Patches with a `machine` key are deep-merged into the base config:
-
-```yaml
-patches:
-  - |
-    machine:
-      install:
-        disk: /dev/sda
-        image: factory.talos.dev/metal-installer/<schematic>:<version>
-      network:
-        hostname: cp-1
-      nodeLabels:
-        topology.kubernetes.io/zone: us-east-1a
-  - |
-    cluster:
-      allowSchedulingOnControlPlanes: true
-      proxy:
-        disabled: true
-```
-
-### Standalone document patches (Talos v1.13+)
-
-Patches without a `machine` key are treated as standalone Talos config documents and appended to the final payload as separate YAML documents. This supports the new document types introduced in Talos v1.13.
-
-**Registry mirrors** (replaces the deprecated `machine.registries`):
-
-```yaml
-patches:
-  - |
-    apiVersion: v1alpha1
-    kind: RegistryMirrorConfig
-    name: docker.io
-    endpoints:
-      - url: https://my-harbor.example.com/v2/dockerhub
-        overridePath: true
-  - |
-    apiVersion: v1alpha1
-    kind: RegistryMirrorConfig
-    name: ghcr.io
-    endpoints:
-      - url: https://my-harbor.example.com/v2/ghcr
-        overridePath: true
-```
-
-> Use `overridePath: true` when the endpoint URL already contains the full registry path (e.g. Harbor proxy cache projects). Without it, containerd appends an extra `/v2/` prefix.
-
-### Inspecting the applied config
-
-After a successful apply, the final merged config (base + all patches) is saved to a secret named `{node}-config` in the same namespace:
+Quick path (operator runs locally, CRDs installed in kind):
 
 ```bash
-kubectl get secret my-node-config -o jsonpath='{.data.config\.yaml}' | base64 -d
+make kind-up
+make kind-install-crds
+make talos-up TALOS_NODE_NAME=cp1
+make run
 ```
+
+---
+
+## Features
+
+Per-node patches, drift detection, Talos version upgrades, system extensions, node removal, and more: see **[docs/features.md](docs/features.md)**.

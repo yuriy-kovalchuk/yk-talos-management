@@ -73,30 +73,3 @@ func TestIsContextCancelled(t *testing.T) {
 	}
 }
 
-func TestIsCancelled(t *testing.T) {
-	t.Run("canceled context returns true", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
-		if !IsCancelled(ctx) {
-			t.Error("expected IsCancelled() = true for canceled context")
-		}
-	})
-
-	t.Run("deadline exceeded context returns true", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 0)
-		defer cancel()
-
-		if !IsCancelled(ctx) {
-			t.Error("expected IsCancelled() = true for deadline exceeded")
-		}
-	})
-
-	t.Run("active context returns false", func(t *testing.T) {
-		ctx := context.Background()
-
-		if IsCancelled(ctx) {
-			t.Error("expected IsCancelled() = false for active context")
-		}
-	})
-}

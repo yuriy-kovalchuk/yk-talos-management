@@ -2,7 +2,6 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 )
 
 type TalosClusterBootstrapPhase string
@@ -12,6 +11,7 @@ const (
 	TalosClusterBootstrapPhaseWaitingForNodes      TalosClusterBootstrapPhase = "WaitingForNodes"
 	TalosClusterBootstrapPhaseBootstrapping        TalosClusterBootstrapPhase = "Bootstrapping"
 	TalosClusterBootstrapPhaseWaitingForKubeconfig TalosClusterBootstrapPhase = "WaitingForKubeconfig"
+	TalosClusterBootstrapPhaseWaitingForAPIServer  TalosClusterBootstrapPhase = "WaitingForAPIServer"
 	TalosClusterBootstrapPhaseCompleted            TalosClusterBootstrapPhase = "Completed"
 	TalosClusterBootstrapPhaseError                TalosClusterBootstrapPhase = "Error"
 )
@@ -20,6 +20,7 @@ const (
 const (
 	TalosClusterBootstrapConditionBootstrapped = "Bootstrapped"
 	TalosClusterBootstrapConditionKubeconfig   = "KubeconfigAvailable"
+	TalosClusterBootstrapConditionAPIServer    = "APIServerReady"
 )
 
 type TalosClusterBootstrapSpec struct {
@@ -43,7 +44,6 @@ type TalosClusterBootstrapStatus struct {
 // +kubebuilder:printcolumn:name=Cluster,type=string,JSONPath=.spec.clusterRef
 // +kubebuilder:printcolumn:name=Phase,type=string,JSONPath=.status.phase
 // +kubebuilder:resource:scope=Namespaced,path=talosclusterbootstraps,shortName=talosclusterbootstrap
-// +kubebuilder:webhooks:verbs=create;update,path=/validate-talos-yuriykovalchuk-dev-v1alpha1-talosclusterbootstrap,validatingWebhookGeneratorStrategy=webhook-client
 
 // TalosClusterBootstrap bootstraps etcd on the first control plane node and stores the kubeconfig.
 type TalosClusterBootstrap struct {
@@ -54,12 +54,8 @@ type TalosClusterBootstrap struct {
 	Status TalosClusterBootstrapStatus `json:"status,omitempty"`
 }
 
-func (t *TalosClusterBootstrap) DeepCopyObject() runtime.Object { return t }
-
 type TalosClusterBootstrapList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []TalosClusterBootstrap `json:"items"`
 }
-
-func (t *TalosClusterBootstrapList) DeepCopyObject() runtime.Object { return t }

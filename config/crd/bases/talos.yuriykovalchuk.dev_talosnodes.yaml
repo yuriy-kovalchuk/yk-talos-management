@@ -51,6 +51,11 @@ spec:
               clusterRef:
                 description: Name of the TalosCluster this node belongs to.
                 type: string
+              drainTimeout:
+                description: |-
+                  Maximum time to wait for all pods to be evicted during node drain.
+                  Defaults to 5 minutes.
+                type: string
               driftDetection:
                 default: true
                 description: |-
@@ -99,11 +104,44 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
+              resetOnDelete:
+                default: false
+                description: |-
+                  When true, the operator wipes the node's ephemeral state and reboots it into
+                  maintenance mode as part of the deletion sequence (after etcd leave, before the
+                  config secret is removed). Useful when the node hardware will be repurposed —
+                  the next TalosNode pointing at the same IP will apply a fresh config.
+                  Best-effort: a reset failure is logged and emits an event but never blocks deletion.
+                type: boolean
               role:
                 description: Role of this node in the cluster.
                 enum:
                 - ControlPlane
                 - Worker
+                type: string
+              skipDrain:
+                default: false
+                description: |-
+                  When true, skip Kubernetes node drain (cordon + pod eviction) during node removal.
+                  Use for nodes that are already unreachable or when fast removal is required.
+                type: boolean
+              systemExtensions:
+                description: |-
+                  Talos system extensions to install on this node via the Talos Image Factory.
+                  Extensions are hardware-specific — nodes in the same cluster can have different
+                  extension sets. Changing this list triggers an upgrade to a new factory-built
+                  image at the current (or newly specified) Talos version.
+                  Extension names follow the format "siderolabs/<name>" (e.g. "siderolabs/iscsi-tools").
+                items:
+                  type: string
+                type: array
+              talosVersion:
+                description: |-
+                  Desired Talos OS version to run on this node (e.g. "v1.13.2").
+                  When set and different from status.currentTalosVersion, the operator triggers
+                  an in-place upgrade automatically. When spec.systemExtensions is also set,
+                  the factory-built image for the current schematic is used so extensions are
+                  preserved across version upgrades. Downgrades are rejected.
                 type: string
             required:
             - clusterRef
@@ -169,10 +207,23 @@ spec:
                   - type
                   type: object
                 type: array
+              currentTalosVersion:
+                description: |-
+                  Talos version currently running on this node.
+                  Populated after a successful upgrade via the talos.yuriykovalchuk.dev/upgrade annotation
+                  or spec.talosVersion.
+                type: string
               deletionAttempts:
                 description: Number of failed etcd leave attempts during deletion.
                 format: int32
                 type: integer
+              installedExtensions:
+                description: |-
+                  System extensions currently installed on the node.
+                  Populated after a successful upgrade that included spec.systemExtensions.
+                items:
+                  type: string
+                type: array
               lastUpdateTime:
                 description: Timestamp of the last successful reconcile.
                 format: date-time

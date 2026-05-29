@@ -1,0 +1,33 @@
+# Dev tools pod deployed in the operator namespace for local development.
+# Contains both kubectl (for the managed k8s cluster) and talosctl (for Talos API).
+#
+# Kind cluster pods share the Docker "kind" network with the Talos containers,
+# so both kubeconfig and talosconfig endpoints are reachable directly.
+#
+# Lifecycle:
+#   make kind-deploy                      — builds image, loads into kind, deploys pod
+#   make tools-inject CLUSTER=<name>      — inject kubeconfig + talosconfig from secrets
+#   make tools-shell                      — open interactive shell
+#
+# Both configs are ephemeral — re-inject after any pod restart.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tools
+  namespace: yk-talos-management-system
+  labels:
+    app.kubernetes.io/name: tools
+    app.kubernetes.io/component: dev-tools
+spec:
+  restartPolicy: Always
+  containers:
+    - name: tools
+      image: tools:local
+      imagePullPolicy: Never
+      command: ["sleep", "infinity"]
+      resources:
+        requests:
+          cpu: "10m"
+          memory: "16Mi"
+        limits:
+          memory: "128Mi"

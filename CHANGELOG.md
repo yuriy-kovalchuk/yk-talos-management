@@ -7,6 +7,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version
 
 ## [Unreleased]
 
+### Added
+- **Talos version upgrade**: two paths supported. Declarative via `spec.talosVersion` (controller upgrades automatically when spec differs from `status.currentTalosVersion`). Imperative via `talos.yuriykovalchuk.dev/upgrade=<image>` annotation (mirrors `talosctl upgrade --image`). Both paths poll until the node returns running the expected version.
+- **Downgrade protection**: both upgrade paths reject downgrades with a `DowngradeBlocked` warning event; trigger is consumed so the event fires once.
+- **System extensions via Image Factory**: `spec.systemExtensions` calls the Talos Image Factory to build a custom installer image and upgrades the node to it. Schematic ID cached in `current-schematic` annotation; no HTTP call on subsequent reconciles if the extension list is unchanged.
+- **`spec.talosVersion` and `spec.systemExtensions` combined**: setting both in the same commit results in a single reboot applying both changes.
+- **Node drain on deletion**: cordon, pod eviction, and Kubernetes `Node` object deletion before etcd leave and Secret cleanup. Controlled by `spec.skipDrain` (default `false`) and `spec.drainTimeout` (default `5m`).
+- **`spec.resetOnDelete`**: wipes the node and reboots it to maintenance mode after etcd leave, before Secret cleanup. Best-effort; failure never blocks deletion.
+- **Standalone node reset** (`talos.yuriykovalchuk.dev/reset=<id>`): one-shot wipe and reboot to maintenance mode without removing the node from the cluster. Controller re-applies machine config automatically after the node comes back.
+- **`talos.yuriykovalchuk.dev/skip-drain=true` annotation**: bypasses drain on an already-terminating `TalosNode` without editing the spec.
+- **GitOps-safe annotation pattern**: `upgrade` and `reset` annotations use companion annotations (`last-upgrade`, `last-reset`) as idempotency keys. Controller acts only when trigger differs from companion; re-adding the same value after a GitOps sync is a no-op.
+- **`TalosNodePhaseUpgrading` and `TalosNodePhaseDeleting`**: new phases visible via `kubectl get talosnode`.
+- **`status.currentTalosVersion`**: populated after a successful upgrade.
+- **`TalosCluster` deletion guard**: blocks deletion while any `TalosNode` still references the cluster; requeues every 30s.
+- **`TalosClusterBootstrap` API server readiness check**: `Phase=Completed` now requires the Kubernetes API server to respond to a Discovery probe. New `WaitingForAPIServer` phase added.
+- **`talos_node_upgrade_total` and `talos_node_drain_total` metrics**: Prometheus counters for upgrade and drain outcomes.
+- **`tools` pod**: bundles `kubectl` and `talosctl`; `make tools-inject` injects both kubeconfig and talosconfig; `make tools-shell` opens a shell with both tools ready.
+
+### Changed
+- `talos.yuriykovalchuk.dev/reset` uses a request-ID value instead of a fixed `"true"`. The value `"true"` still works; to re-trigger after a GitOps sync, change the value.
+- `--zap-encoder=json` added explicitly to Deployment and Helm chart args.
+- `requeueAfter` logged as human-readable duration strings instead of nanoseconds.
+- Log messages lowercased to match logr/Zap convention.
+
+### Fixed
+- Node reset (`spec.resetOnDelete` and standalone annotation) now wipes only `STATE` and `EPHEMERAL` partitions, preserving the boot partition so the node can return to maintenance mode. Previously an empty `SystemPartitionsToWipe` wiped all partitions including the bootloader.
+- Standalone reset uses `Graceful=true` (clean service shutdown); delete-path reset uses `Graceful=false` (node may be degraded after drain).
+- `EtcdForceRemoveByIP` now treats a missing member as a no-op instead of an error; correct for nodes that never joined etcd or were already removed.
+- `TalosCluster` deletion no longer silently orphans `TalosNode` objects; deletion guard prevents credentials being removed before node finalizers complete.
+- Last-CP guard no longer blocks deletion when the `TalosCluster` object is already gone, which previously left CP nodes stuck with their finalizer.
+- `TalosClusterBootstrap` no longer reports `Phase=Completed` before the Kubernetes API server is reachable.
+- Standalone reset annotation no longer re-triggers indefinitely under ArgoCD/Flux.
+
 ---
 
 ## [0.4.0-alpha] - 2026-05-10
