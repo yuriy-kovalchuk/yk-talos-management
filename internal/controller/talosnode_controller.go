@@ -286,10 +286,11 @@ func (r *TalosNodeReconciler) handleDeletion(ctx context.Context, node *v1alpha1
 
 	// Reset-on-delete: wipe the node before cleanup so it returns to maintenance mode.
 	// Best-effort — failure is logged and emits an event but never blocks deletion.
+	// graceful=false: node may already be degraded after drain + etcd leave.
 	if node.Spec.ResetOnDelete {
 		l := log.FromContext(ctx)
 		emitEvent(r.Recorder, node, corev1.EventTypeNormal, "NodeResetTriggered", "Resetting node before cleanup (spec.resetOnDelete)")
-		if err := r.tryReset(ctx, node); err != nil {
+		if err := r.tryReset(ctx, node, false); err != nil {
 			l.Error(err, "reset-on-delete failed, proceeding with cleanup", "ip", node.Spec.NodeIP)
 			emitEvent(r.Recorder, node, corev1.EventTypeWarning, "NodeResetFailed", fmt.Sprintf("reset-on-delete failed: %v", err))
 		} else {
@@ -359,7 +360,7 @@ func (r *TalosNodeReconciler) handleStandaloneReset(ctx context.Context, node *v
 	emitEvent(r.Recorder, node, corev1.EventTypeNormal, "NodeResetTriggered", "Node reset triggered via annotation")
 	l.Info("reset triggered via annotation", "ip", node.Spec.NodeIP)
 
-	if err := r.tryReset(ctx, node); err != nil {
+	if err := r.tryReset(ctx, node, true); err != nil {
 		l.Error(err, "node reset failed", "ip", node.Spec.NodeIP)
 		emitEvent(r.Recorder, node, corev1.EventTypeWarning, "NodeResetFailed", err.Error())
 		return ctrl.Result{}, nil
@@ -393,7 +394,9 @@ func (r *TalosNodeReconciler) withConn(ctx context.Context, talosconfig []byte, 
 }
 
 // tryReset dials the node via mTLS and issues a reset (wipe + reboot to maintenance mode).
-func (r *TalosNodeReconciler) tryReset(ctx context.Context, node *v1alpha1.TalosNode) error {
+// graceful=true stops services cleanly first (for healthy nodes); false skips service
+// shutdown (for nodes that may already be degraded after drain).
+func (r *TalosNodeReconciler) tryReset(ctx context.Context, node *v1alpha1.TalosNode, graceful bool) error {
 	talosconfig, _, skip, err := r.loadTalosconfig(ctx, node)
 	if err != nil {
 		return fmt.Errorf("load talosconfig: %w", err)
@@ -402,7 +405,7 @@ func (r *TalosNodeReconciler) tryReset(ctx context.Context, node *v1alpha1.Talos
 		return fmt.Errorf("talosconfig or cluster not found")
 	}
 	return r.withConn(ctx, talosconfig, node.Spec.NodeIP, func(conn TalosConnection) error {
-		return conn.Reset(ctx, node.Spec.NodeIP)
+		return conn.Reset(ctx, node.Spec.NodeIP, graceful)
 	})
 }
 

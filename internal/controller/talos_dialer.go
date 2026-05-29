@@ -25,8 +25,10 @@ type TalosConnection interface {
 	GetVersion(ctx context.Context, nodeIP string) (tag, mode string, err error)
 	EtcdLeave(ctx context.Context, nodeIP string) error
 	EtcdForceRemove(ctx context.Context, survivorIP, deadNodeIP string) error
-	// Reset wipes the node's ephemeral state and reboots it into maintenance mode.
-	Reset(ctx context.Context, nodeIP string) error
+	// Reset wipes the node's STATE and EPHEMERAL partitions and reboots into
+	// maintenance mode. graceful=true stops services cleanly first (use for
+	// healthy nodes); graceful=false skips service shutdown (use when degraded).
+	Reset(ctx context.Context, nodeIP string, graceful bool) error
 	// Upgrade initiates an in-place Talos upgrade to the given installer image.
 	Upgrade(ctx context.Context, nodeIP, image string) error
 	Close() error
@@ -87,8 +89,8 @@ func (r *realConnection) GetVersion(ctx context.Context, nodeIP string) (string,
 	return talos.GetVersion(ctx, r.c, nodeIP)
 }
 
-func (r *realConnection) Reset(ctx context.Context, nodeIP string) error {
-	return talos.ResetNode(ctx, r.c, nodeIP)
+func (r *realConnection) Reset(ctx context.Context, nodeIP string, graceful bool) error {
+	return talos.ResetNode(ctx, r.c, nodeIP, graceful)
 }
 
 func (r *realConnection) Upgrade(ctx context.Context, nodeIP, image string) error {

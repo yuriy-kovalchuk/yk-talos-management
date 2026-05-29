@@ -311,16 +311,25 @@ func UpgradeNode(ctx context.Context, c *Client, nodeIP, image string) error {
 	return err
 }
 
-// ResetNode wipes the node's ephemeral state and reboots it into maintenance mode.
-// Graceful is false so the reset proceeds even when the kubelet is in a degraded state.
-// Used for the standalone annotation-triggered reset and the spec.resetOnDelete path.
-func ResetNode(ctx context.Context, c *Client, nodeIP string) error {
+// ResetNode wipes the node's STATE and EPHEMERAL partitions and reboots into
+// maintenance mode, matching `talosctl reset --reboot` defaults.
+//
+// graceful=true stops all services cleanly before wiping (mirrors `talosctl reset
+// --graceful=true`, the default). Use false only when the node may already be
+// degraded (e.g. after drain during deletion).
+func ResetNode(ctx context.Context, c *Client, nodeIP string, graceful bool) error {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 	start := time.Now()
 	err := c.ResetGeneric(talosclient.WithNode(ctx, nodeIP), &machineapi.ResetRequest{
-		Graceful: false,
+		Graceful: graceful,
 		Reboot:   true,
+		// Wipe only STATE and EPHEMERAL so the boot partition is preserved and the
+		// node can return to maintenance mode — matching `talosctl reset` defaults.
+		SystemPartitionsToWipe: []*machineapi.ResetPartitionSpec{
+			{Label: "STATE", Wipe: true},
+			{Label: "EPHEMERAL", Wipe: true},
+		},
 	})
 	appmetrics.APICallDuration.WithLabelValues("reset_node", appmetrics.ResultLabel(err)).Observe(time.Since(start).Seconds())
 	return err
@@ -353,8 +362,10 @@ func EtcdForceRemoveByIP(ctx context.Context, c *Client, survivorIP, deadNodeIP 
 
 	memberID := findEtcdMemberID(resp.GetMessages(), deadNodeIP)
 	if memberID == 0 {
-		appmetrics.APICallDuration.WithLabelValues("etcd_force_remove", "error").Observe(time.Since(start).Seconds())
-		return fmt.Errorf("etcd member with IP %s not found in membership list", deadNodeIP)
+		// Member is not in the list — it was never added or was already removed.
+		// Treat as success so deletion is not blocked.
+		appmetrics.APICallDuration.WithLabelValues("etcd_force_remove", "success").Observe(time.Since(start).Seconds())
+		return nil
 	}
 
 	err = c.EtcdRemoveMemberByID(talosclient.WithNode(ctx, survivorIP), &machineapi.EtcdRemoveMemberByIDRequest{

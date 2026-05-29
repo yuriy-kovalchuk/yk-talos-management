@@ -143,7 +143,7 @@ func (f *fakeConnection) EtcdForceRemove(_ context.Context, _, _ string) error {
 	return f.etcdForceRemoveErr
 }
 
-func (f *fakeConnection) Reset(_ context.Context, _ string) error {
+func (f *fakeConnection) Reset(_ context.Context, _ string, _ bool) error {
 	f.resetCall = true
 	return f.resetErr
 }
