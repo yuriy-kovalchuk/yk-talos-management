@@ -8,31 +8,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version
 ## [Unreleased]
 
 ### Added
-- **Node upgrade via annotation** (`talos.yuriykovalchuk.dev/upgrade=<image>`): triggers an in-place Talos version upgrade. Mirrors `talosctl upgrade --image <image>` per-node semantics. The controller dials the node, detects container mode (skips with Warning event), issues the upgrade RPC, then polls every 30s until the node returns running the expected version. Sets `status.currentTalosVersion`, the `TalosVersionUpToDate` condition, and emits `NodeUpgradeTriggered` / `NodeUpgradeComplete` / `NodeUpgradeFailed` events.
-- **`TalosNodePhaseUpgrading`**: new phase visible via `kubectl get talosnode` while a node is rebooting after an upgrade RPC.
-- **`status.currentTalosVersion`**: populated after a successful upgrade; shows the installed Talos version tag (e.g. `v1.13.1`).
-- **`talos_node_upgrade_total` metric**: Prometheus counter tracking upgrade outcomes (`success`, `error`, `skipped`) labelled by cluster.
-- **GitOps-safe annotation pattern**: both `reset` and `upgrade` annotations now use a request-ID + companion-annotation scheme (`last-reset` / `last-upgrade`). The controller acts only when trigger ≠ companion; GitOps tools (ArgoCD, Flux) re-adding the trigger annotation after sync are silently ignored. To trigger a second operation, change the annotation value to a new unique string.
-- **Node drain on deletion**: when a `TalosNode` is deleted the operator cordons the node, evicts all pods, and removes the Kubernetes `Node` object before proceeding with etcd leave and Secret cleanup. Controlled by `spec.skipDrain` (default `false`) and `spec.drainTimeout` (default `5m`).
-- **Hostname resolution for drain**: the operator dials the Talos API and reads the node hostname via the COSI `HostnameStatus` resource before cordoning. This ensures the correct Kubernetes `Node` object is found regardless of which network interface kubelet registered with.
-- **`spec.resetOnDelete`**: when `true`, the operator wipes the node's ephemeral state and reboots it into maintenance mode after etcd leave and before Secret cleanup. Best-effort — failure is logged and emits an event but never blocks deletion. No-op on Docker/container nodes.
-- **Standalone reset annotation** (`talos.yuriykovalchuk.dev/reset=<id>`): triggers a one-shot wipe + reboot to maintenance mode without removing the node from the cluster inventory. GitOps-safe via `last-reset` companion annotation. On success, `ConfigApplied` is cleared so the next reconcile re-applies the machine config.
-- **Skip-drain annotation** (`talos.yuriykovalchuk.dev/skip-drain=true`): escape hatch to bypass a stuck drain on an already-terminating `TalosNode` without modifying the spec. Useful when a PDB or unreachable node blocks eviction after `kubectl delete` has already been issued.
-- **`TalosNodePhaseDeleting`**: new phase set as soon as the deletion finalizer starts processing, visible via `kubectl get talosnode`.
-- **`TalosCluster` deletion guard**: the operator blocks `TalosCluster` deletion while any `TalosNode` objects still reference it, setting `Phase=Deleting` and requeuing every 30s. Prevents credentials being torn out from under running node finalizers.
-- **Last-CP guard fix**: when the `TalosCluster` object is already gone, the last-ControlPlane guard is bypassed so orphaned CP nodes can still be cleaned up.
-- **`TalosClusterBootstrap` API server readiness check**: `Phase=Completed` now requires the Kubernetes API server to respond to a `Discovery` probe in addition to the kubeconfig being stored. A new `WaitingForAPIServer` phase (with `APIServerReady` condition) is set while the probe retries every 15s.
-- **`talos_node_drain_total` metric**: Prometheus counter tracking drain operation outcomes (`success`, `skipped`, `timeout`) labelled by cluster.
-- **`tools` pod**: the local development pod now bundles both `kubectl` and `talosctl`; `make tools-inject` injects both kubeconfig and talosconfig in a single command; `make tools-shell` opens an interactive shell with both tools ready.
+- **Talos version upgrade**: two paths supported. Declarative via `spec.talosVersion` (controller upgrades automatically when spec differs from `status.currentTalosVersion`). Imperative via `talos.yuriykovalchuk.dev/upgrade=<image>` annotation (mirrors `talosctl upgrade --image`). Both paths poll until the node returns running the expected version.
+- **Downgrade protection**: both upgrade paths reject downgrades with a `DowngradeBlocked` warning event; trigger is consumed so the event fires once.
+- **System extensions via Image Factory**: `spec.systemExtensions` calls the Talos Image Factory to build a custom installer image and upgrades the node to it. Schematic ID cached in `current-schematic` annotation; no HTTP call on subsequent reconciles if the extension list is unchanged.
+- **`spec.talosVersion` and `spec.systemExtensions` combined**: setting both in the same commit results in a single reboot applying both changes.
+- **Node drain on deletion**: cordon, pod eviction, and Kubernetes `Node` object deletion before etcd leave and Secret cleanup. Controlled by `spec.skipDrain` (default `false`) and `spec.drainTimeout` (default `5m`).
+- **`spec.resetOnDelete`**: wipes the node and reboots it to maintenance mode after etcd leave, before Secret cleanup. Best-effort; failure never blocks deletion.
+- **Standalone node reset** (`talos.yuriykovalchuk.dev/reset=<id>`): one-shot wipe and reboot to maintenance mode without removing the node from the cluster. Controller re-applies machine config automatically after the node comes back.
+- **`talos.yuriykovalchuk.dev/skip-drain=true` annotation**: bypasses drain on an already-terminating `TalosNode` without editing the spec.
+- **GitOps-safe annotation pattern**: `upgrade` and `reset` annotations use companion annotations (`last-upgrade`, `last-reset`) as idempotency keys. Controller acts only when trigger differs from companion; re-adding the same value after a GitOps sync is a no-op.
+- **`TalosNodePhaseUpgrading` and `TalosNodePhaseDeleting`**: new phases visible via `kubectl get talosnode`.
+- **`status.currentTalosVersion`**: populated after a successful upgrade.
+- **`TalosCluster` deletion guard**: blocks deletion while any `TalosNode` still references the cluster; requeues every 30s.
+- **`TalosClusterBootstrap` API server readiness check**: `Phase=Completed` now requires the Kubernetes API server to respond to a Discovery probe. New `WaitingForAPIServer` phase added.
+- **`talos_node_upgrade_total` and `talos_node_drain_total` metrics**: Prometheus counters for upgrade and drain outcomes.
+- **`tools` pod**: bundles `kubectl` and `talosctl`; `make tools-inject` injects both kubeconfig and talosconfig; `make tools-shell` opens a shell with both tools ready.
 
 ### Changed
-- `talos.yuriykovalchuk.dev/reset` now uses a request-ID pattern instead of a fixed `"true"` value. The value `"true"` still works as before (backward compatible). To trigger a second reset after GitOps re-applies the annotation, change the value to a new unique string.
+- `talos.yuriykovalchuk.dev/reset` uses a request-ID value instead of a fixed `"true"`. The value `"true"` still works; to re-trigger after a GitOps sync, change the value.
+- `--zap-encoder=json` added explicitly to Deployment and Helm chart args.
+- `requeueAfter` logged as human-readable duration strings instead of nanoseconds.
+- Log messages lowercased to match logr/Zap convention.
 
 ### Fixed
-- `TalosCluster` deletion could silently orphan `TalosNode` objects and permanently block their own deletion via the last-CP guard — the deletion guard above resolves this.
-- Last-CP guard incorrectly blocked deletion when the `TalosCluster` was already gone, leaving CP nodes stuck with their finalizer forever.
-- `TalosClusterBootstrap` reported `Phase=Completed` before the Kubernetes API server was actually reachable, causing downstream tooling to fail immediately after bootstrap.
-- Standalone reset annotation (`talos.yuriykovalchuk.dev/reset`) re-triggered indefinitely when managed by ArgoCD/Flux — fixed by the GitOps-safe companion-annotation pattern.
+- Node reset (`spec.resetOnDelete` and standalone annotation) now wipes only `STATE` and `EPHEMERAL` partitions, preserving the boot partition so the node can return to maintenance mode. Previously an empty `SystemPartitionsToWipe` wiped all partitions including the bootloader.
+- Standalone reset uses `Graceful=true` (clean service shutdown); delete-path reset uses `Graceful=false` (node may be degraded after drain).
+- `EtcdForceRemoveByIP` now treats a missing member as a no-op instead of an error; correct for nodes that never joined etcd or were already removed.
+- `TalosCluster` deletion no longer silently orphans `TalosNode` objects; deletion guard prevents credentials being removed before node finalizers complete.
+- Last-CP guard no longer blocks deletion when the `TalosCluster` object is already gone, which previously left CP nodes stuck with their finalizer.
+- `TalosClusterBootstrap` no longer reports `Phase=Completed` before the Kubernetes API server is reachable.
+- Standalone reset annotation no longer re-triggers indefinitely under ArgoCD/Flux.
 
 ---
 
