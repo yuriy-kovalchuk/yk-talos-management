@@ -6,11 +6,11 @@ require (
 	github.com/blang/semver/v4 v4.0.0
 	github.com/cosi-project/runtime v1.16.1
 	github.com/prometheus/client_golang v1.23.2
-	github.com/siderolabs/talos/pkg/machinery v1.13.3
+	github.com/siderolabs/talos/pkg/machinery v1.13.4
 	google.golang.org/grpc v1.81.1
-	k8s.io/api v0.36.1
-	k8s.io/apimachinery v0.36.1
-	k8s.io/client-go v0.36.1
+	k8s.io/api v0.36.2
+	k8s.io/apimachinery v0.36.2
+	k8s.io/client-go v0.36.2
 	k8s.io/utils v0.0.0-20260210185600-b8788abfbbc2
 	sigs.k8s.io/controller-runtime v0.24.1
 	sigs.k8s.io/yaml v1.6.0
