@@ -37,7 +37,7 @@ jobs:
         run: go test -v -race -count=1 -coverprofile=coverage.txt ./...
 
       - name: Upload coverage report
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           files: coverage.txt
         continue-on-error: true
