@@ -153,7 +153,10 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 			if talos.IsContextCancelled(err) {
 				return ctrl.Result{}, nil
 			}
-			return r.setError(ctx, &bootstrap, fmt.Errorf("bootstrap: %w", err))
+			if !talos.IsAlreadyExists(err) {
+				return r.setError(ctx, &bootstrap, fmt.Errorf("bootstrap: %w", err))
+			}
+			// AlreadyExists: etcd was already bootstrapped (e.g. CR was recreated) — treat as success
 		}
 		talos.SetConditionStatus(&bootstrap.Status.Conditions,
 			v1alpha1.TalosClusterBootstrapConditionBootstrapped, metav1.ConditionTrue,

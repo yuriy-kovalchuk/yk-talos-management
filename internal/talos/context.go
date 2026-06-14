@@ -20,3 +20,11 @@ func IsContextCancelled(err error) bool {
 	return false
 }
 
+// IsAlreadyExists returns true if err is a gRPC AlreadyExists status error.
+func IsAlreadyExists(err error) bool {
+	if s, ok := status.FromError(err); ok {
+		return s.Code() == codes.AlreadyExists
+	}
+	return false
+}
+
