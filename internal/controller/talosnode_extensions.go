@@ -44,6 +44,15 @@ func (r *TalosNodeReconciler) reconcileVersion(ctx context.Context, node *v1alph
 		return ctrl.Result{}, false, nil
 	}
 
+	// Don't attempt an upgrade before the initial config has been applied.
+	// A node in maintenance mode must be configured via applyConfig first —
+	// the mTLS connection used by the upgrade RPC is unavailable until then,
+	// and reconcileVersion returning done=true would prevent applyConfig from
+	// ever running, leaving the node stuck in a retry loop.
+	if !talos.HasCondition(node.Status.Conditions, v1alpha1.TalosNodeConditionConfigApplied, metav1.ConditionTrue) {
+		return ctrl.Result{}, false, nil
+	}
+
 	result, err := r.computeDesiredImage(ctx, node)
 	if err != nil {
 		emitEvent(r.Recorder, node, corev1.EventTypeWarning, "ExtensionSchematicFailed",
