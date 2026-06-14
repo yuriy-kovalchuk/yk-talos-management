@@ -107,7 +107,9 @@ manifests: controller-gen
 	@for crd in $(CRD_DIR)/*.yaml; do \
 	    name=$$(basename $$crd); \
 	    dst=charts/yk-talos-management/templates/crds/$$name; \
-	    { printf '{{- if .Values.crds.install }}\n'; cat $$crd; printf '{{- end }}\n'; } > $$dst; \
+	    { printf '{{- if .Values.crds.install }}\n'; \
+	      awk '/controller-gen.kubebuilder.io\/version:/{print; print "    helm.sh/resource-policy: keep"; next}1' $$crd; \
+	      printf '{{- end }}\n'; } > $$dst; \
 	done
 
 # ── Build ─────────────────────────────────────────────────────────────────────

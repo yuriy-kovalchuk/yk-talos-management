@@ -689,17 +689,22 @@ func (r *TalosNodeReconciler) applyConfig(ctx context.Context, node *v1alpha1.Ta
 		configBytes = append(configBytes, '\n')
 	}
 
+	talosconfigSecret, tcErr := getSecret(ctx, r.Client, clusterTalosconfigName(cluster.Name), node.Namespace)
+	var talosconfigBytes []byte
+	if tcErr == nil {
+		talosconfigBytes, tcErr = secretKey(talosconfigSecret, "talosconfig")
+	}
+
 	var conn TalosConnection
 	if firstApply {
 		conn, err = r.Talos.DialInsecure(ctx, node.Spec.NodeIP)
+		if err != nil && tcErr == nil {
+			// Node may already be running (e.g. after CR recreation) — fall back to mTLS.
+			conn, err = r.Talos.Dial(ctx, talosconfigBytes, node.Spec.NodeIP)
+		}
 	} else {
-		talosconfigSecret, tcErr := getSecret(ctx, r.Client, clusterTalosconfigName(cluster.Name), node.Namespace)
 		if tcErr != nil {
 			return fmt.Errorf("get talosconfig secret: %w", tcErr)
-		}
-		talosconfigBytes, tcErr := secretKey(talosconfigSecret, "talosconfig")
-		if tcErr != nil {
-			return fmt.Errorf("read talosconfig: %w", tcErr)
 		}
 		conn, err = r.Talos.Dial(ctx, talosconfigBytes, node.Spec.NodeIP)
 	}

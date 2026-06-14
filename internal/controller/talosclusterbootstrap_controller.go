@@ -153,7 +153,10 @@ func (r *TalosClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctr
 			if talos.IsContextCancelled(err) {
 				return ctrl.Result{}, nil
 			}
-			return r.setError(ctx, &bootstrap, fmt.Errorf("bootstrap: %w", err))
+			if !talos.IsAlreadyExists(err) {
+				return r.setError(ctx, &bootstrap, fmt.Errorf("bootstrap: %w", err))
+			}
+			// AlreadyExists: etcd was already bootstrapped (e.g. CR was recreated) — treat as success
 		}
 		talos.SetConditionStatus(&bootstrap.Status.Conditions,
 			v1alpha1.TalosClusterBootstrapConditionBootstrapped, metav1.ConditionTrue,
@@ -319,21 +322,18 @@ func (r *TalosClusterBootstrapReconciler) handleDeletion(ctx context.Context, bo
 
 func (r *TalosClusterBootstrapReconciler) saveKubeconfig(ctx context.Context, cluster *v1alpha1.TalosCluster, kubeconfig []byte) error {
 	name := clusterKubeconfigName(cluster.Name)
-	newFn := func() *corev1.Secret {
-		s := newSecret(name, cluster.Namespace, "kubeconfig", kubeconfig)
-		s.OwnerReferences = []metav1.OwnerReference{{
-			APIVersion: "talos.yuriykovalchuk.dev/v1alpha1",
-			Kind:       "TalosCluster",
-			Name:       cluster.Name,
-			UID:        cluster.UID,
-			Controller: ptr.To(true),
-		}}
-		return s
+	s := newSecret(name, cluster.Namespace, "kubeconfig", kubeconfig)
+	s.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "talos.yuriykovalchuk.dev/v1alpha1",
+		Kind:       "TalosCluster",
+		Name:       cluster.Name,
+		UID:        cluster.UID,
+		Controller: ptr.To(true),
+	}}
+	if err := r.Client.Create(ctx, s); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
 	}
-	return upsertSecret(ctx, r.Client, name, cluster.Namespace,
-		newFn,
-		func(s *corev1.Secret) { s.Data["kubeconfig"] = kubeconfig },
-	)
+	return nil
 }
 
 func (r *TalosClusterBootstrapReconciler) setError(ctx context.Context, bootstrap *v1alpha1.TalosClusterBootstrap, err error) (ctrl.Result, error) {
