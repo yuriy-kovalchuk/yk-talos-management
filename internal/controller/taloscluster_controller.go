@@ -176,15 +176,15 @@ func (r *TalosClusterReconciler) provision(ctx context.Context, cluster *v1alpha
 		return err
 	}
 
-	if err := sm.CreateOrUpdate(ctx, clusterControlPlaneName(cluster.Name), cluster.Namespace,
+	if err := sm.Create(ctx, clusterControlPlaneName(cluster.Name), cluster.Namespace,
 		"controlplane.yaml", string(configs.ControlPlane), corev1.SecretTypeOpaque); err != nil {
 		return fmt.Errorf("store controlplane: %w", err)
 	}
-	if err := sm.CreateOrUpdate(ctx, clusterWorkerName(cluster.Name), cluster.Namespace,
+	if err := sm.Create(ctx, clusterWorkerName(cluster.Name), cluster.Namespace,
 		"worker.yaml", string(configs.Worker), corev1.SecretTypeOpaque); err != nil {
 		return fmt.Errorf("store worker: %w", err)
 	}
-	if err := sm.CreateOrUpdate(ctx, clusterTalosconfigName(cluster.Name), cluster.Namespace,
+	if err := sm.Create(ctx, clusterTalosconfigName(cluster.Name), cluster.Namespace,
 		"talosconfig", string(configs.Talosconfig), corev1.SecretTypeOpaque); err != nil {
 		return fmt.Errorf("store talosconfig: %w", err)
 	}

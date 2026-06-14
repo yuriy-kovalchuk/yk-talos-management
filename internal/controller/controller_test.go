@@ -1963,7 +1963,7 @@ func TestTalosClusterBootstrapReconciler_SetError(t *testing.T) {
 }
 
 // saveKubeconfig update path: kubeconfig secret already exists and must be overwritten.
-func TestTalosClusterBootstrapReconciler_UpdatesExistingKubeconfig(t *testing.T) {
+func TestTalosClusterBootstrapReconciler_PreservesExistingKubeconfig(t *testing.T) {
 	s := newTestScheme(t)
 	conn := &fakeConnection{kubeconfig: []byte("new-kubeconfig-data")}
 
@@ -1995,8 +1995,8 @@ func TestTalosClusterBootstrapReconciler_UpdatesExistingKubeconfig(t *testing.T)
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "mycluster-kubeconfig", Namespace: "default"}, &kubeSec); err != nil {
 		t.Fatalf("expected kubeconfig secret: %v", err)
 	}
-	if string(kubeSec.Data["kubeconfig"]) != "new-kubeconfig-data" {
-		t.Errorf("expected updated kubeconfig, got %q", kubeSec.Data["kubeconfig"])
+	if string(kubeSec.Data["kubeconfig"]) != "old-kubeconfig-data" {
+		t.Errorf("existing kubeconfig must not be overwritten, got %q", kubeSec.Data["kubeconfig"])
 	}
 }
 

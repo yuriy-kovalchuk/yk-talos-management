@@ -322,21 +322,18 @@ func (r *TalosClusterBootstrapReconciler) handleDeletion(ctx context.Context, bo
 
 func (r *TalosClusterBootstrapReconciler) saveKubeconfig(ctx context.Context, cluster *v1alpha1.TalosCluster, kubeconfig []byte) error {
 	name := clusterKubeconfigName(cluster.Name)
-	newFn := func() *corev1.Secret {
-		s := newSecret(name, cluster.Namespace, "kubeconfig", kubeconfig)
-		s.OwnerReferences = []metav1.OwnerReference{{
-			APIVersion: "talos.yuriykovalchuk.dev/v1alpha1",
-			Kind:       "TalosCluster",
-			Name:       cluster.Name,
-			UID:        cluster.UID,
-			Controller: ptr.To(true),
-		}}
-		return s
+	s := newSecret(name, cluster.Namespace, "kubeconfig", kubeconfig)
+	s.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "talos.yuriykovalchuk.dev/v1alpha1",
+		Kind:       "TalosCluster",
+		Name:       cluster.Name,
+		UID:        cluster.UID,
+		Controller: ptr.To(true),
+	}}
+	if err := r.Client.Create(ctx, s); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
 	}
-	return upsertSecret(ctx, r.Client, name, cluster.Namespace,
-		newFn,
-		func(s *corev1.Secret) { s.Data["kubeconfig"] = kubeconfig },
-	)
+	return nil
 }
 
 func (r *TalosClusterBootstrapReconciler) setError(ctx context.Context, bootstrap *v1alpha1.TalosClusterBootstrap, err error) (ctrl.Result, error) {
